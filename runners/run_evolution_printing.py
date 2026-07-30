@@ -34,6 +34,7 @@ STDEV_LEARNING_RATE = 0.1
 STDEV_INIT = 0.5              # RESEARCH AND DECIDE 0.5 is just a guesss
 MAX_SPEED = 0.15
 PRINT_INTERVAL = 50
+L1_LAMBDA = 1e-3
 
 torch.manual_seed(MASTER_SEED)
 torch.cuda.manual_seed_all(MASTER_SEED)
@@ -49,7 +50,11 @@ center_init = torch.randn(GENOME_LENGTH, device=DEVICE)
 
 # ==== 4. BUILD EVOTORCH PROBLEM + PGPE SEARCHER ==============================
 objective = functools.partial(
-    fitness_function_printing, device=DEVICE, noise_generator=noise_generator, reward_generator=reward_generator,
+    fitness_function_printing,
+    device=DEVICE,
+    noise_generator=noise_generator,
+    reward_generator=reward_generator,
+    l1_lambda=L1_LAMBDA,
 )
 
 configure_printing(

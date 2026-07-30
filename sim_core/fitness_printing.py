@@ -3,6 +3,7 @@
 import torch
 from sim_core.constants import N
 from sim_core.genome_codec import unflatten_genome
+from sim_core.fitness_terms import compute_l1_penalty
 from sim_core.maze_task import simulate_training_phase
 from sim_core.maze_task_printing import simulate_training_phase_printing
 from sim_core.replay_task import simulate_replay_phase, assign_replay_reward
@@ -101,7 +102,10 @@ def _print_tracking_block(
     evaluation_idx,
     pop,
     training_reward_cpu,
-    total_reward_cpu,
+    unregularized_reward_cpu,
+    complexity_cpu,
+    l1_penalty_cpu,
+    regularized_fitness_cpu,
     frob_start_cpu,
     frob_end_cpu,
     frob_delta_cpu,
@@ -112,7 +116,7 @@ def _print_tracking_block(
     rewarded = tracking["rewarded_by_run"].detach().cpu()
     big_reward = tracking["big_reward_by_run"].detach().cpu()
 
-    reward_hist = _ascii_hist(total_reward_cpu, _HIST_BINS)
+    reward_hist = _ascii_hist(regularized_fitness_cpu, _HIST_BINS)
 
     start_mean = float(frob_start_cpu.mean().item())
     end_mean = float(frob_end_cpu.mean().item())
@@ -170,7 +174,10 @@ def _print_tracking_block(
         ["Reward metric", "Mean", "Min", "Max"],
         [
             ("Training reward", f"{float(training_reward_cpu.mean().item()):.4f}", f"{float(training_reward_cpu.min().item()):.4f}", f"{float(training_reward_cpu.max().item()):.4f}"),
-            ("Total reward", f"{float(total_reward_cpu.mean().item()):.4f}", f"{float(total_reward_cpu.min().item()):.4f}", f"{float(total_reward_cpu.max().item()):.4f}"),
+            ("Reward before L1", f"{float(unregularized_reward_cpu.mean().item()):.4f}", f"{float(unregularized_reward_cpu.min().item()):.4f}", f"{float(unregularized_reward_cpu.max().item()):.4f}"),
+            ("L1 complexity", f"{float(complexity_cpu.mean().item()):.4f}", f"{float(complexity_cpu.min().item()):.4f}", f"{float(complexity_cpu.max().item()):.4f}"),
+            ("L1 penalty", f"{float(l1_penalty_cpu.mean().item()):.4f}", f"{float(l1_penalty_cpu.min().item()):.4f}", f"{float(l1_penalty_cpu.max().item()):.4f}"),
+            ("Fitness after L1", f"{float(regularized_fitness_cpu.mean().item()):.4f}", f"{float(regularized_fitness_cpu.min().item()):.4f}", f"{float(regularized_fitness_cpu.max().item()):.4f}"),
         ],
     ))
     print()
@@ -189,7 +196,7 @@ def _print_tracking_block(
     print()
 
 
-def evaluate_generation_printing(genome_flat, device, noise_generator, reward_generator):
+def evaluate_generation_printing(genome_flat, device, noise_generator, reward_generator, l1_lambda):
     global _EVALUATION_CALL_COUNT
     _EVALUATION_CALL_COUNT += 1
     should_print = _should_print(_EVALUATION_CALL_COUNT)
@@ -220,7 +227,9 @@ def evaluate_generation_printing(genome_flat, device, noise_generator, reward_ge
         genome["beta"], genome["eta"], noise_generator, device,
     )
     replay_reward = assign_replay_reward(replay_trace, REPLAY_REWARD_METHOD)
-    total_reward = training_reward + replay_reward
+    unregularized_reward = training_reward + replay_reward
+    complexity, l1_penalty = compute_l1_penalty(genome_flat, l1_lambda)
+    regularized_fitness = unregularized_reward - l1_penalty
 
     if should_print:
         frob_end = torch.linalg.matrix_norm(W_after_replay, ord="fro", dim=(1, 2))
@@ -229,15 +238,20 @@ def evaluate_generation_printing(genome_flat, device, noise_generator, reward_ge
             evaluation_idx=_EVALUATION_CALL_COUNT,
             pop=pop,
             training_reward_cpu=training_reward.detach().cpu(),
-            total_reward_cpu=total_reward.detach().cpu(),
+            unregularized_reward_cpu=unregularized_reward.detach().cpu(),
+            complexity_cpu=complexity.detach().cpu(),
+            l1_penalty_cpu=l1_penalty.detach().cpu(),
+            regularized_fitness_cpu=regularized_fitness.detach().cpu(),
             frob_start_cpu=frob_start.detach().cpu(),
             frob_end_cpu=frob_end.detach().cpu(),
             frob_delta_cpu=frob_delta.detach().cpu(),
             tracking=tracking,
         )
 
-    return total_reward
+    return regularized_fitness
 
 
-def fitness_function_printing(genome_flat, device, noise_generator, reward_generator):
-    return evaluate_generation_printing(genome_flat, device, noise_generator, reward_generator)
+def fitness_function_printing(genome_flat, device, noise_generator, reward_generator, l1_lambda=0.0):
+    return evaluate_generation_printing(
+        genome_flat, device, noise_generator, reward_generator, l1_lambda=l1_lambda,
+    )
