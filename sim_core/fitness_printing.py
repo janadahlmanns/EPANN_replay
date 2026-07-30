@@ -1,41 +1,75 @@
-"""Instrumented objective function with gated, readable tracking output."""
+"""Instrumented objective with terminal tracking plus plot-ready history capture."""
 
 import torch
+
 from sim_core.constants import N
-from sim_core.genome_codec import unflatten_genome
 from sim_core.fitness_terms import compute_l1_penalty
+from sim_core.genome_codec import unflatten_genome
 from sim_core.maze_task import simulate_training_phase
 from sim_core.maze_task_printing import simulate_training_phase_printing
-from sim_core.replay_task import simulate_replay_phase, assign_replay_reward
+from sim_core.replay_task import assign_replay_reward, simulate_replay_phase
 
+# ==== 1) CONSTANTS ==============================================================
 REPLAY_REWARD_METHOD = "zero"
 TRAINING_CONTEXT_IS_A = True
+
 _EVALUATION_CALL_COUNT = 0
 _TOTAL_GENERATIONS = None
-_PRINT_INTERVAL = 50
-_MAX_NETWORKS_PREVIEW = 6
-_MAX_RUNS_PREVIEW = 20
-_HIST_BINS = 20
+_PRINT_INTERVAL = None
+_MAX_NETWORKS_PREVIEW = None
+_MAX_RUNS_PREVIEW = None
+_HIST_BIN_WIDTH = None
+
+_TRACKED_GENERATIONS = []
+_TRACKED_RECORDS = []
+_REWARD_EVOLUTION = {
+    "generation": [],
+    "mean_eval": [],
+    "median_eval": [],
+    "pop_best_eval": [],
+}
 
 
+# ==== 2) PUBLIC CONTROL + HISTORY ACCESS =======================================
 def configure_printing(
-    total_generations=None,
-    print_interval=50,
-    max_networks_preview=6,
-    max_runs_preview=20,
-    hist_bins=20,
+    total_generations,
+    print_interval,
+    max_networks_preview,
+    max_runs_preview,
+    hist_bin_width,
 ):
-    """Configure logging cadence and verbosity for the printing objective."""
+    """Set printing cadence and clear history buffers for a fresh run."""
     global _TOTAL_GENERATIONS, _PRINT_INTERVAL
-    global _MAX_NETWORKS_PREVIEW, _MAX_RUNS_PREVIEW, _HIST_BINS
+    global _MAX_NETWORKS_PREVIEW, _MAX_RUNS_PREVIEW, _HIST_BIN_WIDTH
+    global _EVALUATION_CALL_COUNT, _TRACKED_GENERATIONS, _TRACKED_RECORDS, _REWARD_EVOLUTION
 
     _TOTAL_GENERATIONS = total_generations
     _PRINT_INTERVAL = print_interval
     _MAX_NETWORKS_PREVIEW = max_networks_preview
     _MAX_RUNS_PREVIEW = max_runs_preview
-    _HIST_BINS = hist_bins
+    _HIST_BIN_WIDTH = hist_bin_width
+
+    _EVALUATION_CALL_COUNT = 0
+    _TRACKED_GENERATIONS = []
+    _TRACKED_RECORDS = []
+    _REWARD_EVOLUTION = {
+        "generation": [],
+        "mean_eval": [],
+        "median_eval": [],
+        "pop_best_eval": [],
+    }
 
 
+def get_printing_history():
+    """Return tracked generations, detailed snapshots, and all-generation reward stats."""
+    return {
+        "tracked_generations": _TRACKED_GENERATIONS,
+        "tracked_records": _TRACKED_RECORDS,
+        "reward_evolution": _REWARD_EVOLUTION,
+    }
+
+
+# ==== 3) TERMINAL-FORMATTING HELPERS ===========================================
 def _format_table(headers, rows):
     cols = len(headers)
     widths = [len(str(h)) for h in headers]
@@ -43,23 +77,31 @@ def _format_table(headers, rows):
         for idx in range(cols):
             widths[idx] = max(widths[idx], len(str(row[idx])))
 
-    def _line(char="-", cross="+"):
+    def _line(char, cross):
         return cross + cross.join(char * (w + 2) for w in widths) + cross
 
-    out = [_line()]
+    out = [_line("-", "+")]
     header_row = "| " + " | ".join(str(headers[i]).ljust(widths[i]) for i in range(cols)) + " |"
     out.append(header_row)
-    out.append(_line("=","+"))
+    out.append(_line("=", "+"))
     for row in rows:
         out.append("| " + " | ".join(str(row[i]).ljust(widths[i]) for i in range(cols)) + " |")
-    out.append(_line())
+    out.append(_line("-", "+"))
     return "\n".join(out)
 
 
-def _ascii_hist(values, bins, width=36):
-    values = values.float()
+def _hist_bin_edges(values, bin_width):
     min_v = float(torch.min(values).item())
     max_v = float(torch.max(values).item())
+    start = bin_width * torch.floor(torch.tensor(min_v / bin_width)).item()
+    end = bin_width * torch.ceil(torch.tensor(max_v / bin_width)).item()
+    bins = max(1, int(round((end - start) / bin_width)))
+    return start, end, bins
+
+
+def _ascii_hist(values, bin_width, width):
+    values = values.float()
+    min_v, max_v, bins = _hist_bin_edges(values, bin_width)
     if min_v == max_v:
         return f"All values are {min_v:.4f}"
 
@@ -70,7 +112,7 @@ def _ascii_hist(values, bins, width=36):
         left = min_v + (max_v - min_v) * (i / bins)
         right = min_v + (max_v - min_v) * ((i + 1) / bins)
         count = int(hist[i].item())
-        bar_len = int((count / max_count) * width) if max_count > 0 else 0
+        bar_len = int((count / max_count) * width)
         bar = "#" * bar_len
         lines.append(f"{left:8.3f}..{right:8.3f} | {bar} ({count})")
     return "\n".join(lines)
@@ -89,8 +131,6 @@ def _decision_symbol(decision, crashed, rewarded, big_reward):
 
 
 def _should_print(evaluation_idx):
-    if _TOTAL_GENERATIONS is None:
-        return True
     if evaluation_idx == 1:
         return True
     if evaluation_idx == _TOTAL_GENERATIONS:
@@ -98,6 +138,7 @@ def _should_print(evaluation_idx):
     return evaluation_idx % _PRINT_INTERVAL == 0
 
 
+# ==== 4) TRACKING SNAPSHOT PRINT =================================================
 def _print_tracking_block(
     evaluation_idx,
     pop,
@@ -116,7 +157,7 @@ def _print_tracking_block(
     rewarded = tracking["rewarded_by_run"].detach().cpu()
     big_reward = tracking["big_reward_by_run"].detach().cpu()
 
-    reward_hist = _ascii_hist(regularized_fitness_cpu, _HIST_BINS)
+    reward_hist = _ascii_hist(regularized_fitness_cpu, _HIST_BIN_WIDTH, 36)
 
     start_mean = float(frob_start_cpu.mean().item())
     end_mean = float(frob_end_cpu.mean().item())
@@ -163,10 +204,7 @@ def _print_tracking_block(
 
     print()
     print("=" * 90)
-    if _TOTAL_GENERATIONS is None:
-        print(f"TRACKING SNAPSHOT | evaluation {evaluation_idx}")
-    else:
-        print(f"TRACKING SNAPSHOT | generation {evaluation_idx}/{_TOTAL_GENERATIONS}")
+    print(f"TRACKING SNAPSHOT | generation {evaluation_idx}/{_TOTAL_GENERATIONS}")
     print("=" * 90)
     print(f"Population size: {pop}")
     print()
@@ -196,10 +234,45 @@ def _print_tracking_block(
     print()
 
 
+# ==== 5) HISTORY WRITER =========================================================
+def _record_history(
+    evaluation_idx,
+    regularized_fitness,
+    frob_start_cpu,
+    frob_end_cpu,
+    tracking,
+):
+    fit_cpu = regularized_fitness.detach().cpu()
+    _REWARD_EVOLUTION["generation"].append(evaluation_idx)
+    _REWARD_EVOLUTION["mean_eval"].append(float(fit_cpu.mean().item()))
+    _REWARD_EVOLUTION["median_eval"].append(float(fit_cpu.median().item()))
+    _REWARD_EVOLUTION["pop_best_eval"].append(float(fit_cpu.max().item()))
+
+    if tracking is None:
+        return
+
+    _TRACKED_GENERATIONS.append(evaluation_idx)
+    _TRACKED_RECORDS.append(
+        {
+            "generation": evaluation_idx,
+            "fitness": fit_cpu,
+            "frob_start": frob_start_cpu.clone(),
+            "frob_end": frob_end_cpu.clone(),
+            "decisions_by_run": tracking["decisions_by_run"].detach().cpu().clone(),
+            "crashed_by_run": tracking["crashed_by_run"].detach().cpu().clone(),
+            "rewarded_by_run": tracking["rewarded_by_run"].detach().cpu().clone(),
+            "big_reward_by_run": tracking["big_reward_by_run"].detach().cpu().clone(),
+            "sensory_cue_by_run": tracking["sensory_cue_by_run"].detach().cpu().clone(),
+        }
+    )
+
+
+# ==== 6) FITNESS EVALUATION =====================================================
 def evaluate_generation_printing(genome_flat, device, noise_generator, reward_generator, l1_lambda):
     global _EVALUATION_CALL_COUNT
     _EVALUATION_CALL_COUNT += 1
-    should_print = _should_print(_EVALUATION_CALL_COUNT)
+    evaluation_idx = _EVALUATION_CALL_COUNT
+    should_print = _should_print(evaluation_idx)
 
     genome_flat = genome_flat.clone()
     pop = genome_flat.shape[0]
@@ -208,8 +281,7 @@ def evaluate_generation_printing(genome_flat, device, noise_generator, reward_ge
     state0 = torch.zeros(pop, N, device=device)
     tracking = None
     if should_print:
-        initial_W = genome["W"]
-        frob_start = torch.linalg.matrix_norm(initial_W, ord="fro", dim=(1, 2))
+        frob_start = torch.linalg.matrix_norm(genome["W"], ord="fro", dim=(1, 2))
         state, W_after_training, training_reward, tracking = simulate_training_phase_printing(
             state0, genome["W"], genome["M"], genome["A"], genome["B"], genome["C"], genome["D"],
             genome["beta"], genome["eta"], TRAINING_CONTEXT_IS_A,
@@ -221,37 +293,53 @@ def evaluate_generation_printing(genome_flat, device, noise_generator, reward_ge
             genome["beta"], genome["eta"], TRAINING_CONTEXT_IS_A,
             noise_generator, reward_generator, device,
         )
+        frob_start = torch.linalg.matrix_norm(genome["W"], ord="fro", dim=(1, 2))
 
     _, W_after_replay, replay_trace = simulate_replay_phase(
         state, W_after_training, genome["M"], genome["A"], genome["B"], genome["C"], genome["D"],
         genome["beta"], genome["eta"], noise_generator, device,
     )
+
     replay_reward = assign_replay_reward(replay_trace, REPLAY_REWARD_METHOD)
     unregularized_reward = training_reward + replay_reward
     complexity, l1_penalty = compute_l1_penalty(genome_flat, l1_lambda)
     regularized_fitness = unregularized_reward - l1_penalty
+    frob_end = torch.linalg.matrix_norm(W_after_replay, ord="fro", dim=(1, 2))
+    frob_delta = frob_end - frob_start
 
     if should_print:
-        frob_end = torch.linalg.matrix_norm(W_after_replay, ord="fro", dim=(1, 2))
-        frob_delta = frob_end - frob_start
         _print_tracking_block(
-            evaluation_idx=_EVALUATION_CALL_COUNT,
-            pop=pop,
-            training_reward_cpu=training_reward.detach().cpu(),
-            unregularized_reward_cpu=unregularized_reward.detach().cpu(),
-            complexity_cpu=complexity.detach().cpu(),
-            l1_penalty_cpu=l1_penalty.detach().cpu(),
-            regularized_fitness_cpu=regularized_fitness.detach().cpu(),
-            frob_start_cpu=frob_start.detach().cpu(),
-            frob_end_cpu=frob_end.detach().cpu(),
-            frob_delta_cpu=frob_delta.detach().cpu(),
-            tracking=tracking,
+            evaluation_idx,
+            pop,
+            training_reward.detach().cpu(),
+            unregularized_reward.detach().cpu(),
+            complexity.detach().cpu(),
+            l1_penalty.detach().cpu(),
+            regularized_fitness.detach().cpu(),
+            frob_start.detach().cpu(),
+            frob_end.detach().cpu(),
+            frob_delta.detach().cpu(),
+            tracking,
+        )
+        _record_history(
+            evaluation_idx,
+            regularized_fitness,
+            frob_start.detach().cpu(),
+            frob_end.detach().cpu(),
+            tracking,
+        )
+    else:
+        _record_history(
+            evaluation_idx,
+            regularized_fitness,
+            frob_start.detach().cpu(),
+            frob_end.detach().cpu(),
+            None,
         )
 
     return regularized_fitness
 
 
-def fitness_function_printing(genome_flat, device, noise_generator, reward_generator, l1_lambda=0.0):
-    return evaluate_generation_printing(
-        genome_flat, device, noise_generator, reward_generator, l1_lambda=l1_lambda,
-    )
+def fitness_function_printing(genome_flat, device, noise_generator, reward_generator, l1_lambda):
+    """Vectorized EvoTorch objective entrypoint."""
+    return evaluate_generation_printing(genome_flat, device, noise_generator, reward_generator, l1_lambda)

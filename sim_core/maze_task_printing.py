@@ -39,12 +39,15 @@ def simulate_training_phase_printing(state, W, M, A, B, C, D, beta, eta,
     crashed_by_run = torch.zeros((pop, NUM_RUNS_PER_TRAINING_PHASE), dtype=torch.bool, device=device)
     rewarded_by_run = torch.zeros((pop, NUM_RUNS_PER_TRAINING_PHASE), dtype=torch.bool, device=device)
     big_reward_by_run = torch.zeros((pop, NUM_RUNS_PER_TRAINING_PHASE), dtype=torch.bool, device=device)
+    # cue label per run: 0 = cue_A (sensory_a active), 1 = cue_B (sensory_b active)
+    sensory_cue_by_run = torch.zeros((pop, NUM_RUNS_PER_TRAINING_PHASE), dtype=torch.long, device=device)
 
     context_a = torch.full((pop,), 1.0 if context_is_A else 0.0, device=device)
     context_b = 1.0 - context_a
 
     big_reward_arm = _draw_reward_arm(pop, reward_generator, device)
     sensory_a, sensory_b = _sensory_from_arm(big_reward_arm, context_is_A)
+    sensory_cue_by_run[:, 0] = (sensory_b > 0.5).long()
 
     for _ in range(MAX_TRAINING_TICKS):
         active = run_count < NUM_RUNS_PER_TRAINING_PHASE
@@ -105,6 +108,14 @@ def simulate_training_phase_printing(state, W, M, A, B, C, D, beta, eta,
         sensory_a = torch.where(terminate, new_sensory_a, sensory_a)
         sensory_b = torch.where(terminate, new_sensory_b, sensory_b)
 
+        # record the cue drawn for the next run of each just-terminated individual
+        if finished.numel() > 0:
+            next_run_idx = run_count[finished]
+            valid = next_run_idx < NUM_RUNS_PER_TRAINING_PHASE
+            if valid.any():
+                vi = finished[valid]
+                sensory_cue_by_run[vi, next_run_idx[valid]] = (new_sensory_b[vi] > 0.5).long()
+
         state = new_state
 
     tracking = {
@@ -112,5 +123,6 @@ def simulate_training_phase_printing(state, W, M, A, B, C, D, beta, eta,
         "crashed_by_run": crashed_by_run,
         "rewarded_by_run": rewarded_by_run,
         "big_reward_by_run": big_reward_by_run,
+        "sensory_cue_by_run": sensory_cue_by_run,
     }
     return state, W, total_reward, tracking

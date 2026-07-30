@@ -27,12 +27,14 @@ MASTER_SEED = 0
 NOISE_SEED = 1
 REWARD_SEED = 2
 
-NUM_GENERATIONS = 1000
+NUM_GENERATIONS = 200
 SEARCH_POPSIZE = 200           
-CENTER_LEARNING_RATE = 0.1
+RADIUS_INIT = 50.0            # radius of the initial search hypersphere in genome space (GENOME_LENGTH-dim), sweep/ optimize
+MAX_SPEED = RADIUS_INIT / 15  # evotorch's rule of thumb from the ClipUp paper: max_speed = radius / 15.0, adjust the 15.0 to optimize
+CENTER_LEARNING_RATE = MAX_SPEED / 2  # this is the step size in the ClipUp paper
 STDEV_LEARNING_RATE = 0.1
-STDEV_INIT = 0.5              # RESEARCH AND DECIDE 0.5 is just a guesss
-MAX_SPEED = 0.15
+MOMENTUM = 0.9  
+
 L1_LAMBDA = 1e-3
 
 torch.manual_seed(MASTER_SEED)
@@ -69,10 +71,10 @@ searcher = PGPE(
     popsize=SEARCH_POPSIZE,
     center_learning_rate=CENTER_LEARNING_RATE,
     stdev_learning_rate=STDEV_LEARNING_RATE,
-    stdev_init=STDEV_INIT,
+    radius_init=RADIUS_INIT,
     center_init=center_init,
     optimizer="clipup",
-    optimizer_config={"max_speed": MAX_SPEED},
+    optimizer_config={"max_speed": MAX_SPEED, "momentum": MOMENTUM},
 )
 
 # ==== 5. RUN + SHOW RESULTS ===================================================
