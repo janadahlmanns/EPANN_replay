@@ -26,7 +26,7 @@ from sim_core.genome_codec import GENOME_LENGTH
 # ==== 2) CONSTANTS / USER INPUTS ===============================================
 RUN_NAME = "NAME"
 DEVICE = "cuda"
-MASTER_SEED = 0
+MASTER_SEED = 9
 NOISE_SEED = 1
 REWARD_SEED = 2
 
@@ -40,7 +40,7 @@ MOMENTUM = 0.9
 
 L1_LAMBDA = 1e-3
 
-TRACKED_PRINT_INTERVAL = 200
+TRACKED_PRINT_INTERVAL = 50
 MAX_NETWORKS_PREVIEW = 6
 MAX_RUNS_PREVIEW = 20
 HIST_BIN_WIDTH = 1
@@ -50,10 +50,12 @@ PLOTS_ROOT = Path("C:/EPANN_replay/data/plots")
 DECISIONS_FILENAME = "decisions.png"
 REWARD_HIST_FILENAME = "reward_hist.png"
 FROBENIUS_FILENAME = "frobenius.png"
+WEIGHT_DISTRIBUTION_FILENAME = "weight_distribution.png"
 REWARD_EVOLUTION_FILENAME = "reward_evolution.png"
 SENSORY_CUE_FILENAME = "sensory_cues.png"
 REWARD_EVOLUTION_COLORS = ["#E07A5F", "#3D405B", "#81B29A"]
 PALETTE_COLORS = ["#E07A5F", "#3D405B", "#81B29A", "#F2CC8F", "#F4F1DE"]
+WEIGHT_HIST_BINS = 80
 
 DECISION_COLORS = [
     "#ffffff",  # .
@@ -181,6 +183,44 @@ def _save_frobenius_plot(plot_dir, tracked_records, tracked_generations, colors)
     plt.close(figure)
 
 
+def _plot_weight_distribution_panel(axis, tracked_records, tracked_generations, colors, key, panel_title):
+    """Draw overlapping line histograms for raw weight values."""
+    all_values = [record[key].numpy().reshape(-1) for record in tracked_records]
+    global_min = min(values.min() for values in all_values)
+    global_max = max(values.max() for values in all_values)
+    if global_min == global_max:
+        global_min -= 0.5
+        global_max += 0.5
+
+    bin_edges = np.linspace(global_min, global_max, WEIGHT_HIST_BINS + 1)
+    x_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
+
+    for idx, values in enumerate(all_values):
+        counts, _ = np.histogram(values, bins=bin_edges, density=True)
+        axis.plot(x_centers, counts, color=colors[idx], linewidth=1.6, alpha=0.9, label=f"gen {tracked_generations[idx]}")
+
+    axis.set_title(panel_title)
+    axis.set_xlabel("Weight value")
+    axis.set_ylabel("Distribution density")
+    axis.grid(True, alpha=0.2)
+
+
+def _save_weight_distribution_plot(plot_dir, tracked_records, tracked_generations, colors):
+    """Save side-by-side line histograms for start and end weight distributions."""
+    figure, axes = plt.subplots(nrows=1, ncols=2, figsize=(16, 6), dpi=PLOT_DPI)
+    _plot_weight_distribution_panel(
+        axes[0], tracked_records, tracked_generations, colors, "weights_start", "Starting weights"
+    )
+    _plot_weight_distribution_panel(
+        axes[1], tracked_records, tracked_generations, colors, "weights_end", "End-of-eval weights"
+    )
+    axes[1].legend()
+    figure.suptitle("Weight-value distributions across tracked generations")
+    figure.tight_layout()
+    figure.savefig(plot_dir / WEIGHT_DISTRIBUTION_FILENAME)
+    plt.close(figure)
+
+
 def _save_reward_evolution_plot(plot_dir, reward_evolution):
     """Save all-generation line plot for mean, median, and best population reward."""
     generations = np.array(reward_evolution["generation"])
@@ -255,6 +295,7 @@ def _save_all_plots(run_name, history):
     _save_decisions_plot(plot_dir, tracked_records)
     _save_reward_hist_plot(plot_dir, tracked_records, tracked_generations, colors)
     _save_frobenius_plot(plot_dir, tracked_records, tracked_generations, colors)
+    _save_weight_distribution_plot(plot_dir, tracked_records, tracked_generations, colors)
     _save_reward_evolution_plot(plot_dir, reward_evolution)
     _save_sensory_cue_plot(plot_dir, tracked_records)
     print(f"\nSaved plots to: {plot_dir}")
@@ -270,7 +311,7 @@ noise_generator.manual_seed(NOISE_SEED)
 reward_generator = torch.Generator(device=DEVICE)
 reward_generator.manual_seed(REWARD_SEED)
 
-center_init = torch.randn(GENOME_LENGTH, device=DEVICE)
+center_init = torch.zeros(GENOME_LENGTH, device=DEVICE)
 
 objective = functools.partial(
     fitness_function_printing,

@@ -47,7 +47,7 @@ reward_generator = torch.Generator(device=DEVICE)
 reward_generator.manual_seed(REWARD_SEED)
 
 # ==== 3. BUILD CENTER_INIT FROM A RANDOM GENOME VECTOR =======================
-center_init = torch.randn(GENOME_LENGTH, device=DEVICE)
+center_init = torch.zeros(GENOME_LENGTH, device=DEVICE)
 
 # ==== 4. BUILD EVOTORCH PROBLEM + PGPE SEARCHER ==============================
 objective = functools.partial(

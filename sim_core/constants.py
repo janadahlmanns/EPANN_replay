@@ -24,13 +24,13 @@ NOISE_STD = 0.1
 # ==== MAZE TASK ===============================================================
 STRAIGHT_THRESH = 1.0 / 3.0
 BIG_REWARD = 1.0
-SMALL_REWARD = 0.2
+SMALL_REWARD = 0.2 # !!changed from 0.2 as in Soltoggio et al. to try something
 CRASH_PENALTY = -0.4
 NUM_RUNS_PER_TRAINING_PHASE = 100
 TICKS_PER_RUN = 7                      # 1,2,3=straight 4=turn 5,6,7=straight(7=mazeend)
 MAX_TRAINING_TICKS = NUM_RUNS_PER_TRAINING_PHASE * TICKS_PER_RUN
 
-# ASSUMPTION (not specified in the brief): arm / sensory-cue / turn-sign mapping.
+# arm / sensory-cue / turn-sign mapping:
 #   arm 0 <-> sensory cue "a" <-> turn output <= -STRAIGHT_THRESH
 #   arm 1 <-> sensory cue "b" <-> turn output >=  STRAIGHT_THRESH
 

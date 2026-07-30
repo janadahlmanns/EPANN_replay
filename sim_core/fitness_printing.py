@@ -240,6 +240,8 @@ def _record_history(
     regularized_fitness,
     frob_start_cpu,
     frob_end_cpu,
+    weights_start_cpu,
+    weights_end_cpu,
     tracking,
 ):
     fit_cpu = regularized_fitness.detach().cpu()
@@ -258,6 +260,8 @@ def _record_history(
             "fitness": fit_cpu,
             "frob_start": frob_start_cpu.clone(),
             "frob_end": frob_end_cpu.clone(),
+            "weights_start": weights_start_cpu.clone(),
+            "weights_end": weights_end_cpu.clone(),
             "decisions_by_run": tracking["decisions_by_run"].detach().cpu().clone(),
             "crashed_by_run": tracking["crashed_by_run"].detach().cpu().clone(),
             "rewarded_by_run": tracking["rewarded_by_run"].detach().cpu().clone(),
@@ -326,6 +330,8 @@ def evaluate_generation_printing(genome_flat, device, noise_generator, reward_ge
             regularized_fitness,
             frob_start.detach().cpu(),
             frob_end.detach().cpu(),
+            genome["W"].detach().cpu(),
+            W_after_replay.detach().cpu(),
             tracking,
         )
     else:
@@ -334,6 +340,8 @@ def evaluate_generation_printing(genome_flat, device, noise_generator, reward_ge
             regularized_fitness,
             frob_start.detach().cpu(),
             frob_end.detach().cpu(),
+            None,
+            None,
             None,
         )
 

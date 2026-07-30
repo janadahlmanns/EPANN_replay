@@ -18,6 +18,7 @@ def simulate_replay_phase(state, W, M, A, B, C, D, beta, eta, noise_generator, d
         new_state = activation_step(state, W, beta, NOISE_STD, noise_generator)
         dW = plasticity_step(state, W, M, A, B, C, D, eta)
         W = W + dW
+        W = W / W.abs().amax(dim=(1, 2), keepdim=True).clamp(min=1e-8)
         new_state[:, :N_INPUT] = zero_input
         output_trace[t] = new_state[:, OUTPUT_IDX]
         state = new_state
