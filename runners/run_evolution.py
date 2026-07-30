@@ -1,6 +1,6 @@
 """First raw end-to-end run: EvoTorch PGPE search over the flattened CTRNN genome,
-using our saved test genome (individual 0) as the search center, for a handful of
-generations, printing results. Not tuned/validated yet -- this is the "get it running"
+using a random genome as the search center, for a handful of generations, printing results.
+Not tuned/validated yet -- this is the "get it running"
 pass; sparsity, hyperparameters, and task complexity (single fixed context, one
 training+replay phase) are all deliberately minimal for now.
 """
@@ -18,13 +18,11 @@ from evotorch import Problem
 from evotorch.algorithms import PGPE
 from evotorch.logging import StdOutLogger
 
-from sim_core.genome_codec import GENOME_LENGTH, flatten_genome
+from sim_core.genome_codec import GENOME_LENGTH
 from sim_core.fitness import fitness_function
 
 # ==== 2. CONSTANTS / USER INPUTS =============================================
 DEVICE = "cuda"
-TEST_GENOME_PATH = "data/test_genome.pt"
-
 MASTER_SEED = 0
 NOISE_SEED = 1
 REWARD_SEED = 2
@@ -45,10 +43,8 @@ noise_generator.manual_seed(NOISE_SEED)
 reward_generator = torch.Generator(device=DEVICE)
 reward_generator.manual_seed(REWARD_SEED)
 
-# ==== 3. BUILD CENTER_INIT FROM THE SAVED TEST GENOME =======================
-test_genome = torch.load(TEST_GENOME_PATH, map_location=DEVICE)
-test_pop = test_genome["W"].shape[0]
-center_init = flatten_genome(test_genome, test_pop)[0]   # individual 0 as the starting point
+# ==== 3. BUILD CENTER_INIT FROM A RANDOM GENOME VECTOR =======================
+center_init = torch.randn(GENOME_LENGTH, device=DEVICE)
 
 # ==== 4. BUILD EVOTORCH PROBLEM + PGPE SEARCHER ==============================
 objective = functools.partial(
