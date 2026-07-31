@@ -31,17 +31,13 @@ def _sensory_from_arm(big_reward_arm, context_is_A):
     return sensory_a, sensory_b
 
 
-# ==== MAIN SIMULATION ==========================================================
-def simulate_training_phase(state, W, M, A, B, C, D, beta, eta,
-                             context_is_A, noise_generator, reward_generator, device):
-    """Runs NUM_RUNS_PER_TRAINING_PHASE maze runs (batched over population).
-    Returns (state, W, total_reward) -- state/W carry on into the next phase."""
+def _initialize_training_phase(state, context_is_A, reward_generator, device):
     pop = state.shape[0]
     state = state.clone()
 
-    step_in_run = torch.ones(pop, dtype=torch.long, device=device)     # current tick, 1..7
-    run_count = torch.zeros(pop, dtype=torch.long, device=device)      # completed runs so far
-    chosen_arm = torch.zeros(pop, dtype=torch.long, device=device)     # arm picked at this run's turn tick
+    step_in_run = torch.ones(pop, dtype=torch.long, device=device)
+    run_count = torch.zeros(pop, dtype=torch.long, device=device)
+    chosen_arm = torch.zeros(pop, dtype=torch.long, device=device)
     total_reward = torch.zeros(pop, device=device)
 
     context_a = torch.full((pop,), 1.0 if context_is_A else 0.0, device=device)
@@ -49,6 +45,53 @@ def simulate_training_phase(state, W, M, A, B, C, D, beta, eta,
 
     big_reward_arm = _draw_reward_arm(pop, reward_generator, device)
     sensory_a, sensory_b = _sensory_from_arm(big_reward_arm, context_is_A)
+
+    return (
+        pop,
+        state,
+        step_in_run,
+        run_count,
+        chosen_arm,
+        total_reward,
+        context_a,
+        context_b,
+        big_reward_arm,
+        sensory_a,
+        sensory_b,
+    )
+
+
+# ==== MAIN SIMULATION ==========================================================
+def simulate_training_phase(state, W, M, A, B, C, D, beta, eta,
+                             context_is_A, noise_generator, reward_generator, device,
+                             collect_tracking=False):
+    """Runs NUM_RUNS_PER_TRAINING_PHASE maze runs (batched over population)."""
+    (
+        pop,
+        state,
+        step_in_run,
+        run_count,
+        chosen_arm,
+        total_reward,
+        context_a,
+        context_b,
+        big_reward_arm,
+        sensory_a,
+        sensory_b,
+    ) = _initialize_training_phase(state, context_is_A, reward_generator, device)
+
+    tracking = None
+    current_turn_choice = None
+    if collect_tracking:
+        current_turn_choice = torch.full((pop,), -1, dtype=torch.long, device=device)
+        tracking = {
+            "decisions_by_run": torch.full((pop, NUM_RUNS_PER_TRAINING_PHASE), -1, dtype=torch.long, device=device),
+            "crashed_by_run": torch.zeros((pop, NUM_RUNS_PER_TRAINING_PHASE), dtype=torch.bool, device=device),
+            "rewarded_by_run": torch.zeros((pop, NUM_RUNS_PER_TRAINING_PHASE), dtype=torch.bool, device=device),
+            "big_reward_by_run": torch.zeros((pop, NUM_RUNS_PER_TRAINING_PHASE), dtype=torch.bool, device=device),
+            "sensory_cue_by_run": torch.zeros((pop, NUM_RUNS_PER_TRAINING_PHASE), dtype=torch.long, device=device),
+        }
+        tracking["sensory_cue_by_run"][:, 0] = (sensory_b > 0.5).long()
 
     for _ in range(MAX_TRAINING_TICKS):
         active = run_count < NUM_RUNS_PER_TRAINING_PHASE
@@ -86,14 +129,26 @@ def simulate_training_phase(state, W, M, A, B, C, D, beta, eta,
 
         reward_delta = torch.zeros(pop, device=device)
         reward_delta = torch.where(crash, torch.full_like(reward_delta, CRASH_PENALTY), reward_delta)
-        arm_reward = torch.where(chosen_arm == big_reward_arm,
-                                  torch.full_like(reward_delta, BIG_REWARD),
-                                  torch.full_like(reward_delta, SMALL_REWARD))
+        chose_big_reward_arm = chosen_arm == big_reward_arm
+        arm_reward = torch.where(chose_big_reward_arm,
+                                 torch.full_like(reward_delta, BIG_REWARD),
+                                 torch.full_like(reward_delta, SMALL_REWARD))
         reward_delta = torch.where(got_reward, arm_reward, reward_delta)
         total_reward += reward_delta
 
         # --- terminate / reset finished runs ---
         terminate = crash | got_reward
+        if collect_tracking:
+            current_turn_choice = torch.where(is_turn_tick, arm_choice, current_turn_choice)
+            finished = torch.where(terminate)[0]
+            if finished.numel() > 0:
+                finished_run_idx = run_count[finished]
+                tracking["decisions_by_run"][finished, finished_run_idx] = current_turn_choice[finished]
+                tracking["crashed_by_run"][finished, finished_run_idx] = crash[finished]
+                tracking["rewarded_by_run"][finished, finished_run_idx] = got_reward[finished]
+                tracking["big_reward_by_run"][finished, finished_run_idx] = (got_reward & chose_big_reward_arm)[finished]
+            current_turn_choice = torch.where(terminate, torch.full_like(current_turn_choice, -1), current_turn_choice)
+
         run_count += terminate.long()
         step_in_run = torch.where(terminate, torch.ones_like(step_in_run), step_in_run + 1)
 
@@ -103,6 +158,15 @@ def simulate_training_phase(state, W, M, A, B, C, D, beta, eta,
         sensory_a = torch.where(terminate, new_sensory_a, sensory_a)
         sensory_b = torch.where(terminate, new_sensory_b, sensory_b)
 
+        if collect_tracking and finished.numel() > 0:
+            next_run_idx = run_count[finished]
+            valid = next_run_idx < NUM_RUNS_PER_TRAINING_PHASE
+            if valid.any():
+                vi = finished[valid]
+                tracking["sensory_cue_by_run"][vi, next_run_idx[valid]] = (new_sensory_b[vi] > 0.5).long()
+
         state = new_state
 
+    if collect_tracking:
+        return state, W, total_reward, tracking
     return state, W, total_reward
