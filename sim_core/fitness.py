@@ -25,6 +25,13 @@ _REWARD_EVOLUTION = {
     "mean_eval": [],
     "median_eval": [],
     "pop_best_eval": [],
+    "std_eval": [],
+    "training_reward_mean": [],
+    "training_reward_median": [],
+    "training_reward_best": [],
+    "l1_penalty_mean": [],
+    "l1_penalty_median": [],
+    "l1_penalty_best": [],
 }
 
 
@@ -54,6 +61,13 @@ def configure_printing(
         "mean_eval": [],
         "median_eval": [],
         "pop_best_eval": [],
+        "std_eval": [],
+        "training_reward_mean": [],
+        "training_reward_median": [],
+        "training_reward_best": [],
+        "l1_penalty_mean": [],
+        "l1_penalty_median": [],
+        "l1_penalty_best": [],
     }
 
 
@@ -235,6 +249,8 @@ def _print_tracking_block(
 def _record_history(
     evaluation_idx,
     regularized_fitness,
+    training_reward,
+    l1_penalty,
     frob_start_cpu,
     frob_end_cpu,
     weights_start_cpu,
@@ -242,10 +258,19 @@ def _record_history(
     tracking,
 ):
     fit_cpu = regularized_fitness.detach().cpu()
+    tr_cpu = training_reward.detach().cpu()
+    l1_cpu = l1_penalty.detach().cpu()
     _REWARD_EVOLUTION["generation"].append(evaluation_idx)
     _REWARD_EVOLUTION["mean_eval"].append(float(fit_cpu.mean().item()))
     _REWARD_EVOLUTION["median_eval"].append(float(fit_cpu.median().item()))
     _REWARD_EVOLUTION["pop_best_eval"].append(float(fit_cpu.max().item()))
+    _REWARD_EVOLUTION["std_eval"].append(float(fit_cpu.std(unbiased=False).item()))
+    _REWARD_EVOLUTION["training_reward_mean"].append(float(tr_cpu.mean().item()))
+    _REWARD_EVOLUTION["training_reward_median"].append(float(tr_cpu.median().item()))
+    _REWARD_EVOLUTION["training_reward_best"].append(float(tr_cpu.max().item()))
+    _REWARD_EVOLUTION["l1_penalty_mean"].append(float(l1_cpu.mean().item()))
+    _REWARD_EVOLUTION["l1_penalty_median"].append(float(l1_cpu.median().item()))
+    _REWARD_EVOLUTION["l1_penalty_best"].append(float(l1_cpu.max().item()))
 
     if tracking is None:
         return
@@ -324,6 +349,8 @@ def evaluate_generation(genome_flat, device, noise_generator, reward_generator, 
         _record_history(
             evaluation_idx,
             regularized_fitness,
+            training_reward,
+            l1_penalty,
             frob_start.detach().cpu(),
             frob_end.detach().cpu(),
             genome["W"].detach().cpu(),
@@ -334,6 +361,8 @@ def evaluate_generation(genome_flat, device, noise_generator, reward_generator, 
         _record_history(
             evaluation_idx,
             regularized_fitness,
+            training_reward,
+            l1_penalty,
             frob_start.detach().cpu(),
             frob_end.detach().cpu(),
             None,
