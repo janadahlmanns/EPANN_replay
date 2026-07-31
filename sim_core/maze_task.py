@@ -7,12 +7,27 @@ never crashed; a wrong output at any tick ends the run immediately (crash penalt
 reset to start). The CTRNN state and weights W are NEVER reset between runs or
 maze resets -- only the maze/task bookkeeping (position, reward arm, sensory cue)
 resets. This is what makes the plasticity itself the thing being evolved.
+
+Reward schedule (see constants.py "REWARD SCHEDULE" section for the full spec):
+  - Crashing (choosing straight when a turn is required, or vice versa) always
+    costs CRASH_PENALTY and ends the run immediately, no matter which tick it
+    happens on.
+  - Choosing a valid direction at the turn tick pays out immediately (does NOT
+    end the run) -- TURN_REWARD_BIG if that arm matches this run's big-reward
+    arm, else TURN_REWARD_SMALL. The run then continues down that corridor.
+  - Reaching mazeend without crashing pays out again, using the same
+    big/small-arm logic, ending the run.
+  - Any turn payout already earned is kept even if the run later crashes, so a
+    fully successful run pays out twice (up to BIG_REWARD + BIG_REWARD = 2.0),
+    a run that crashes after turning keeps the turn payout minus CRASH_PENALTY,
+    and a run that crashes before ever turning only pays CRASH_PENALTY.
 """
 
 import torch
 from sim_core.constants import (
     N_INPUT, OUTPUT_IDX, NOISE_STD, STRAIGHT_THRESH,
     BIG_REWARD, SMALL_REWARD, CRASH_PENALTY,
+    TURN_REWARD_BIG, TURN_REWARD_SMALL,
     NUM_RUNS_PER_TRAINING_PHASE, MAX_TRAINING_TICKS,
 )
 from sim_core.ctrnn import activation_step, plasticity_step
@@ -85,11 +100,16 @@ def simulate_training_phase(state, W, M, A, B, C, D, beta, eta,
     if collect_tracking:
         current_turn_choice = torch.full((pop,), -1, dtype=torch.long, device=device)
         tracking = {
+            # -1 = no turn recorded this run, 0 = left, 1 = right
             "decisions_by_run": torch.full((pop, NUM_RUNS_PER_TRAINING_PHASE), -1, dtype=torch.long, device=device),
             "crashed_by_run": torch.zeros((pop, NUM_RUNS_PER_TRAINING_PHASE), dtype=torch.bool, device=device),
             "rewarded_by_run": torch.zeros((pop, NUM_RUNS_PER_TRAINING_PHASE), dtype=torch.bool, device=device),
+            # kept for backward compatibility -- equals correct_arm_by_run whenever rewarded_by_run is True
             "big_reward_by_run": torch.zeros((pop, NUM_RUNS_PER_TRAINING_PHASE), dtype=torch.bool, device=device),
             "sensory_cue_by_run": torch.zeros((pop, NUM_RUNS_PER_TRAINING_PHASE), dtype=torch.long, device=device),
+            # was the direction chosen at the turn tick the run's big-reward arm? only meaningful
+            # where decisions_by_run != -1 (i.e. a turn actually happened this run)
+            "correct_arm_by_run": torch.zeros((pop, NUM_RUNS_PER_TRAINING_PHASE), dtype=torch.bool, device=device),
         }
         tracking["sensory_cue_by_run"][:, 0] = (sensory_b > 0.5).long()
 
@@ -121,25 +141,42 @@ def simulate_training_phase(state, W, M, A, B, C, D, beta, eta,
         turn_ok = output.abs() >= STRAIGHT_THRESH
         correct = torch.where(is_turn_tick, turn_ok, straight_ok)
 
-        arm_choice = torch.where(output >= STRAIGHT_THRESH, torch.ones_like(chosen_arm), torch.zeros_like(chosen_arm))
+        arm_choice = torch.where(
+            output >= STRAIGHT_THRESH,
+            torch.ones_like(chosen_arm),
+            torch.where(
+                output <= -STRAIGHT_THRESH,
+                torch.zeros_like(chosen_arm),
+                torch.full_like(chosen_arm, -1),
+            ),
+        )
         chosen_arm = torch.where(is_turn_tick, arm_choice, chosen_arm)
 
         crash = active & (~correct)
         got_reward = active & is_end_tick & correct
+        turned_correctly = active & is_turn_tick & correct  # valid direction chosen; run continues
+
+        # arm_reward/turn_reward both use the same big/small-arm magnitude,
+        # since a "correct" (big-reward) arm pays BIG_REWARD and a "wrong"
+        # (small-reward) arm pays SMALL_REWARD at each payout point.
+        chose_big_reward_arm = chosen_arm == big_reward_arm
+        arm_reward = torch.where(chose_big_reward_arm,
+                                 torch.full_like(total_reward, BIG_REWARD),
+                                 torch.full_like(total_reward, SMALL_REWARD))
+        turn_reward = torch.where(chose_big_reward_arm,
+                                  torch.full_like(total_reward, TURN_REWARD_BIG),
+                                  torch.full_like(total_reward, TURN_REWARD_SMALL))
 
         reward_delta = torch.zeros(pop, device=device)
         reward_delta = torch.where(crash, torch.full_like(reward_delta, CRASH_PENALTY), reward_delta)
-        chose_big_reward_arm = chosen_arm == big_reward_arm
-        arm_reward = torch.where(chose_big_reward_arm,
-                                 torch.full_like(reward_delta, BIG_REWARD),
-                                 torch.full_like(reward_delta, SMALL_REWARD))
+        reward_delta = torch.where(turned_correctly, turn_reward, reward_delta)
         reward_delta = torch.where(got_reward, arm_reward, reward_delta)
         total_reward += reward_delta
 
-        # --- terminate / reset finished runs ---
+        # --- terminate / reset finished runs (only crash or reaching mazeend end a run) ---
         terminate = crash | got_reward
         if collect_tracking:
-            current_turn_choice = torch.where(is_turn_tick, arm_choice, current_turn_choice)
+            current_turn_choice = torch.where(is_turn_tick & turn_ok, arm_choice, current_turn_choice)
             finished = torch.where(terminate)[0]
             if finished.numel() > 0:
                 finished_run_idx = run_count[finished]
@@ -147,6 +184,9 @@ def simulate_training_phase(state, W, M, A, B, C, D, beta, eta,
                 tracking["crashed_by_run"][finished, finished_run_idx] = crash[finished]
                 tracking["rewarded_by_run"][finished, finished_run_idx] = got_reward[finished]
                 tracking["big_reward_by_run"][finished, finished_run_idx] = (got_reward & chose_big_reward_arm)[finished]
+                tracking["correct_arm_by_run"][finished, finished_run_idx] = (
+                    current_turn_choice[finished] == big_reward_arm[finished]
+                )
             current_turn_choice = torch.where(terminate, torch.full_like(current_turn_choice, -1), current_turn_choice)
 
         run_count += terminate.long()

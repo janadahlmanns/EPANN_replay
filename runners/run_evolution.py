@@ -10,6 +10,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import functools
+import math
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -25,23 +26,23 @@ from sim_core.fitness import configure_printing, fitness_function, get_printing_
 from sim_core.genome_codec import GENOME_LENGTH, GENOME_SPEC
 
 # ==== 2) CONSTANTS / USER INPUTS ===============================================
-RUN_NAME = "NAME"
+RUN_NAME = "taskA"
 DEVICE = "cuda"
 MASTER_SEED = 0
-NOISE_SEED = 1 
+NOISE_SEED = 1
 REWARD_SEED = 2
 
-NUM_GENERATIONS = 200
-SEARCH_POPSIZE = 200           
-RADIUS_INIT = 5            # radius of the initial search hypersphere in genome space (GENOME_LENGTH-dim), sweep/ optimize
+NUM_GENERATIONS = 1000
+SEARCH_POPSIZE = 200
+RADIUS_INIT = 50            # radius of the initial search hypersphere in genome space (GENOME_LENGTH-dim), sweep/ optimize
 MAX_SPEED = RADIUS_INIT / 15.0  # evotorch's rule of thumb from the ClipUp paper: max_speed = radius / 15.0, adjust the 15.0 to optimize
 CENTER_LEARNING_RATE = MAX_SPEED / 2  # this is the step size in the ClipUp paper
 STDEV_LEARNING_RATE = 0.1
-MOMENTUM = 0.9  
+MOMENTUM = 0.9
 
 L1_LAMBDA = 1e-3
 
-TRACKED_PER_INTERVAL = 200
+TRACKED_PER_INTERVAL = 40
 MAX_NETWORKS_PREVIEW = 6
 MAX_RUNS_PREVIEW = 20
 HIST_BIN_WIDTH = 1
@@ -49,6 +50,8 @@ PLOT_DPI = 180
 
 PLOTS_ROOT = Path("C:/EPANN_replay/data/plots")
 DECISIONS_FILENAME = "decisions.png"
+ALL_DECISIONS_FILENAME = "all_decisions.png"
+EVENT_COUNTS_FILENAME = "event_counts.png"
 REWARD_HIST_FILENAME = "reward_hist.png"
 FROBENIUS_FILENAME = "frobenius.png"
 WEIGHT_DISTRIBUTION_FILENAME = "weight_distribution.png"
@@ -62,16 +65,34 @@ REWARD_EVOLUTION_COLORS = ["#E07A5F", "#3D405B", "#81B29A"]
 PALETTE_COLORS = ["#E07A5F", "#3D405B", "#81B29A", "#F2CC8F", "#F4F1DE"]
 WEIGHT_HIST_BINS = 80
 
+# Decision-outcome categories, encoded 0..9 in _decision_category_matrix.
+# Color design: lightness encodes crash (light) vs. maze-end reward (dark);
+# hue encodes turn direction (red=left, blue=right; gray/neutral = no turn);
+# saturation encodes whether the chosen arm was correct (high) or not (low).
+#   .  = no event                              -> white
+#   x  = crash before/at the turn (no turn)     -> super light, near-white gray
+#   Lx = correct left turn, then crash          -> light, highly saturated red
+#   Rx = correct right turn, then crash         -> light, highly saturated blue
+#   lx = wrong left turn, then crash            -> light, low saturation red
+#   rx = wrong right turn, then crash           -> light, low saturation blue
+#   L  = correct left turn, big reward at end   -> dark, highly saturated red
+#   R  = correct right turn, big reward at end  -> dark, highly saturated blue
+#   l  = wrong left turn, small reward at end   -> dark, low saturation red
+#   r  = wrong right turn, small reward at end  -> dark, low saturation blue
 DECISION_COLORS = [
     "#ffffff",  # .
-    "#e3e3e3",  # x
-    "#9a9a9a",  # X
-    "#f3b4b4",  # l
-    "#b30000",  # L
-    "#bcd9ff",  # r
-    "#003d99",  # R
+    "#f0f0f0",  # x
+    "#f49a9a",  # Lx
+    "#9abff4",  # Rx
+    "#dfc3c3",  # lx
+    "#c3cfdf",  # rx
+    "#9c1111",  # L
+    "#114b9c",  # R
+    "#7e4444",  # l
+    "#445c7e",  # r
 ]
-DECISION_LABELS = [".", "x", "X", "l", "L", "r", "R"]
+DECISION_LABELS = [".", "x", "Lx", "Rx", "lx", "rx", "L", "R", "l", "r"]
+N_DECISION_CATEGORIES = len(DECISION_LABELS)
 
 
 # ==== DEBUG: PGPE DIAGNOSTIC TRACKING (REMOVE AFTER TROUBLESHOOTING) ==========
@@ -182,7 +203,7 @@ def _save_debug_pgpe_params_plot(plot_dir, debug_pgpe_history):
     axes[2].legend()
 
     figure.tight_layout()
-    figure.savefig(plot_dir / DEBUG_PGPE_PARAMS_FILENAME)
+    figure.savefig(_prefixed_path(plot_dir, DEBUG_PGPE_PARAMS_FILENAME))
     plt.close(figure)
 
 
@@ -208,11 +229,16 @@ def _save_debug_pgpe_fitness_plot(plot_dir, debug_pgpe_history):
     axes[1].grid(True, alpha=0.2)
 
     figure.tight_layout()
-    figure.savefig(plot_dir / DEBUG_PGPE_FITNESS_FILENAME)
+    figure.savefig(_prefixed_path(plot_dir, DEBUG_PGPE_FITNESS_FILENAME))
     plt.close(figure)
 
 
 # ==== 3) PLOTTING HELPERS ======================================================
+def _prefixed_path(plot_dir, filename):
+    """Prefix every saved figure's filename with RUN_NAME, e.g. 'decisions.png' -> 'NAME_decisions.png'."""
+    return plot_dir / f"{RUN_NAME}_{filename}"
+
+
 def _generation_colors(tracked_generations):
     """Create light-gray to black colors for tracked generations."""
     count = len(tracked_generations)
@@ -223,54 +249,173 @@ def _generation_colors(tracked_generations):
     return colors
 
 
+def _sort_record_by_fitness(record):
+    """Return a copy of record with all per-network arrays sorted best-to-worst by fitness."""
+    order = np.argsort(record["fitness"].numpy())[::-1].copy()
+    sorted_record = dict(record)
+    for key in ("decisions_by_run", "crashed_by_run", "rewarded_by_run",
+                "big_reward_by_run", "sensory_cue_by_run", "correct_arm_by_run"):
+        sorted_record[key] = record[key][order]
+    return sorted_record
+
+
 def _decision_category_matrix(record):
-    """Encode decision symbols to integer categories for heatmap plotting."""
+    """Encode each run's outcome into one of the 10 categories (see DECISION_LABELS):
+    0=. 1=x 2=Lx 3=Rx 4=lx 5=rx 6=L 7=R 8=l 9=r
+    """
     decisions = record["decisions_by_run"].numpy()
     crashed = record["crashed_by_run"].numpy()
     rewarded = record["rewarded_by_run"].numpy()
-    big_reward = record["big_reward_by_run"].numpy()
+    correct_arm = record["correct_arm_by_run"].numpy()
+
+    left = decisions == 0
+    right = decisions == 1
+    turned = decisions != -1
 
     categories = np.zeros(decisions.shape, dtype=np.int32)
-    categories[(crashed) & (decisions == -1)] = 1
-    categories[(crashed) & (decisions != -1)] = 2
-    categories[(~crashed) & (rewarded) & (~big_reward) & (decisions == 0)] = 3
-    categories[(~crashed) & (rewarded) & (big_reward) & (decisions == 0)] = 4
-    categories[(~crashed) & (rewarded) & (~big_reward) & (decisions == 1)] = 5
-    categories[(~crashed) & (rewarded) & (big_reward) & (decisions == 1)] = 6
+    categories[crashed & ~turned] = 1                                  # x
+    categories[crashed & left & correct_arm] = 2                       # Lx
+    categories[crashed & right & correct_arm] = 3                      # Rx
+    categories[crashed & left & ~correct_arm] = 4                      # lx
+    categories[crashed & right & ~correct_arm] = 5                     # rx
+    categories[rewarded & left & correct_arm] = 6                      # L
+    categories[rewarded & right & correct_arm] = 7                     # R
+    categories[rewarded & left & ~correct_arm] = 8                     # l
+    categories[rewarded & right & ~correct_arm] = 9                    # r
     return categories
 
 
+def _draw_decisions_panel(axis, matrix, title, cmap):
+    """Render a single fitness-sorted decision heatmap panel."""
+    im = axis.imshow(matrix, cmap=cmap, interpolation="nearest", vmin=0, vmax=N_DECISION_CATEGORIES - 1, aspect="auto")
+    axis.set_title(title)
+    axis.set_xlabel("Run index")
+    axis.set_ylabel("Network (best→worst)")
+    return im
+
+
 def _save_decisions_plot(plot_dir, tracked_records):
-    """Save side-by-side heatmaps for first and last tracked generations."""
-    first_record = tracked_records[0]
-    last_record = tracked_records[-1]
-    first_matrix = _decision_category_matrix(first_record)
-    last_matrix = _decision_category_matrix(last_record)
+    """Save side-by-side heatmaps for first and last tracked generations, sorted by fitness."""
+    first_matrix = _decision_category_matrix(_sort_record_by_fitness(tracked_records[0]))
+    last_matrix = _decision_category_matrix(_sort_record_by_fitness(tracked_records[-1]))
 
     cmap = ListedColormap(DECISION_COLORS)
     figure = plt.figure(figsize=(18, 9), dpi=PLOT_DPI)
     grid = figure.add_gridspec(nrows=2, ncols=2, height_ratios=[20, 1], hspace=0.28, wspace=0.12)
-    axes = np.array([
-        figure.add_subplot(grid[0, 0]),
-        figure.add_subplot(grid[0, 1]),
-    ])
+    ax0 = figure.add_subplot(grid[0, 0])
+    ax1 = figure.add_subplot(grid[0, 1])
     colorbar_axis = figure.add_subplot(grid[1, :])
 
-    im0 = axes[0].imshow(first_matrix, cmap=cmap, interpolation="nearest", vmin=0, vmax=6, aspect="auto")
-    axes[0].set_title(f"Generation {first_record['generation']}")
-    axes[0].set_xlabel("Run index")
-    axes[0].set_ylabel("Network index")
+    im0 = _draw_decisions_panel(ax0, first_matrix, f"Generation {tracked_records[0]['generation']}", cmap)
+    _draw_decisions_panel(ax1, last_matrix, f"Generation {tracked_records[-1]['generation']}", cmap)
 
-    axes[1].imshow(last_matrix, cmap=cmap, interpolation="nearest", vmin=0, vmax=6, aspect="auto")
-    axes[1].set_title(f"Generation {last_record['generation']}")
-    axes[1].set_xlabel("Run index")
-    axes[1].set_ylabel("Network index")
-
-    colorbar = figure.colorbar(im0, cax=colorbar_axis, orientation="horizontal", ticks=np.arange(0, 7, 1))
+    colorbar = figure.colorbar(im0, cax=colorbar_axis, orientation="horizontal", ticks=np.arange(0, N_DECISION_CATEGORIES, 1))
     colorbar.ax.set_xticklabels(DECISION_LABELS)
-    figure.suptitle("Decisions: full table heatmaps (first vs last tracked generation)")
+    figure.suptitle("Decisions: first vs last tracked generation (sorted by fitness)")
     figure.tight_layout(rect=[0.0, 0.04, 1.0, 0.95])
-    figure.savefig(plot_dir / DECISIONS_FILENAME)
+    figure.savefig(_prefixed_path(plot_dir, DECISIONS_FILENAME))
+    plt.close(figure)
+
+
+def _save_all_decisions_plot(plot_dir, tracked_records, tracked_generations):
+    """Save a grid of decision heatmaps for every tracked generation, sorted by fitness."""
+    n_plots = len(tracked_records)
+    n_cols = math.ceil(math.sqrt(n_plots))
+    n_rows = math.ceil(n_plots / n_cols)
+
+    cmap = ListedColormap(DECISION_COLORS)
+
+    # Fixed panel size in inches so labels always look the same regardless of grid size.
+    panel_w = 8.0
+    panel_h = 6.0
+    colorbar_h = 0.7
+    title_h = 0.5
+    fs_title = 14
+    fs_axis = 11
+    fs_colorbar = 12
+
+    fig_w = panel_w * n_cols
+    fig_h = panel_h * n_rows + colorbar_h + title_h
+
+    figure = plt.figure(figsize=(fig_w, fig_h), dpi=PLOT_DPI)
+    grid = figure.add_gridspec(
+        nrows=n_rows + 1, ncols=n_cols,
+        height_ratios=[panel_h] * n_rows + [colorbar_h],
+        hspace=0.45, wspace=0.18,
+    )
+
+    im_ref = None
+    for idx, record in enumerate(tracked_records):
+        row, col = divmod(idx, n_cols)
+        matrix = _decision_category_matrix(_sort_record_by_fitness(record))
+        ax = figure.add_subplot(grid[row, col])
+        im = ax.imshow(matrix, cmap=cmap, interpolation="nearest", vmin=0, vmax=N_DECISION_CATEGORIES - 1, aspect="auto")
+        ax.set_title(f"Generation {tracked_generations[idx]}", fontsize=fs_title)
+        ax.set_xlabel("Run index", fontsize=fs_axis)
+        ax.set_ylabel("Network (best→worst)", fontsize=fs_axis)
+        ax.tick_params(labelsize=fs_axis - 1)
+        if im_ref is None:
+            im_ref = im
+
+    # hide unused slots in the last row
+    for spare in range(n_plots, n_rows * n_cols):
+        row, col = divmod(spare, n_cols)
+        figure.add_subplot(grid[row, col]).set_visible(False)
+
+    colorbar_axis = figure.add_subplot(grid[n_rows, :])
+    colorbar = figure.colorbar(im_ref, cax=colorbar_axis, orientation="horizontal", ticks=np.arange(0, N_DECISION_CATEGORIES, 1))
+    colorbar.ax.set_xticklabels(DECISION_LABELS, fontsize=fs_colorbar)
+
+    figure.suptitle("Decisions: all tracked generations (sorted by fitness)", fontsize=fs_title + 2, y=1.0)
+    figure.savefig(_prefixed_path(plot_dir, ALL_DECISIONS_FILENAME), bbox_inches="tight")
+    plt.close(figure)
+
+
+def _save_event_counts_plot(plot_dir, tracked_records, tracked_generations, colors):
+    """Save a grouped bar plot: one group per tracked generation, with one bar per event
+    (x, Lx, Rx, lx, rx, L, R, l, r) in each group, showing what % of that generation's
+    events each event type accounted for."""
+    event_labels = DECISION_LABELS[1:]  # exclude "." (not a real event, just padding)
+    event_colors = DECISION_COLORS[1:]  # same event -> color mapping as the decision heatmaps
+    n_events = len(event_labels)
+    n_gens = len(tracked_records)
+
+    counts = np.zeros((n_gens, n_events), dtype=int)
+    for g_idx, record in enumerate(tracked_records):
+        matrix = _decision_category_matrix(record)  # counts don't depend on fitness sort order
+        for e_idx in range(n_events):
+            counts[g_idx, e_idx] = int((matrix == e_idx + 1).sum())
+
+    # percentage of that generation's events (the 9 real event types only -- "." padding
+    # is excluded from both the numerator and the denominator), so each generation's bars
+    # sum to 100% regardless of how many runs actually completed.
+    totals = counts.sum(axis=1, keepdims=True)
+    percentages = np.divide(counts, totals, out=np.zeros_like(counts, dtype=float), where=totals != 0) * 100.0
+
+    fig_w = max(12.0, n_events * n_gens * 0.35)
+    figure, axis = plt.subplots(nrows=1, ncols=1, figsize=(fig_w, 6), dpi=PLOT_DPI)
+
+    group_width = 0.8
+    bar_width = group_width / n_events
+    x_base = np.arange(n_gens)
+
+    for e_idx in range(n_events):
+        offset = (e_idx - (n_events - 1) / 2) * bar_width
+        axis.bar(
+            x_base + offset, percentages[:, e_idx], width=bar_width,
+            color=event_colors[e_idx], edgecolor="#333333", linewidth=0.3,
+            label=event_labels[e_idx],
+        )
+
+    axis.set_xticks(x_base)
+    axis.set_xticklabels([f"gen {g}" for g in tracked_generations])
+    axis.set_xlabel("Generation")
+    axis.set_ylabel("% of events in generation")
+    axis.set_title("Event distribution (%) across tracked generations")
+    axis.grid(True, axis="y", alpha=0.2)
+    axis.legend(ncol=min(n_events, 9), fontsize=8)
+    figure.tight_layout()
+    figure.savefig(_prefixed_path(plot_dir, EVENT_COUNTS_FILENAME))
     plt.close(figure)
 
 
@@ -296,7 +441,7 @@ def _save_reward_hist_plot(plot_dir, tracked_records, tracked_generations, color
     axis.grid(True, alpha=0.2)
     axis.legend()
     figure.tight_layout()
-    figure.savefig(plot_dir / REWARD_HIST_FILENAME)
+    figure.savefig(_prefixed_path(plot_dir, REWARD_HIST_FILENAME))
     plt.close(figure)
 
 
@@ -322,7 +467,7 @@ def _save_frobenius_plot(plot_dir, tracked_records, tracked_generations, colors)
     axes[1].legend()
     figure.suptitle("Frobenius norm evolution across tracked generations")
     figure.tight_layout()
-    figure.savefig(plot_dir / FROBENIUS_FILENAME)
+    figure.savefig(_prefixed_path(plot_dir, FROBENIUS_FILENAME))
     plt.close(figure)
 
 
@@ -360,7 +505,7 @@ def _save_weight_distribution_plot(plot_dir, tracked_records, tracked_generation
     axes[1].legend()
     figure.suptitle("Weight-value distributions across tracked generations")
     figure.tight_layout()
-    figure.savefig(plot_dir / WEIGHT_DISTRIBUTION_FILENAME)
+    figure.savefig(_prefixed_path(plot_dir, WEIGHT_DISTRIBUTION_FILENAME))
     plt.close(figure)
 
 
@@ -381,7 +526,7 @@ def _save_reward_evolution_plot(plot_dir, reward_evolution):
     axis.grid(True, alpha=0.2)
     axis.legend()
     figure.tight_layout()
-    figure.savefig(plot_dir / REWARD_EVOLUTION_FILENAME)
+    figure.savefig(_prefixed_path(plot_dir, REWARD_EVOLUTION_FILENAME))
     plt.close(figure)
 
 
@@ -402,7 +547,7 @@ def _save_training_reward_evolution_plot(plot_dir, reward_evolution):
     axis.grid(True, alpha=0.2)
     axis.legend()
     figure.tight_layout()
-    figure.savefig(plot_dir / TRAINING_REWARD_FILENAME)
+    figure.savefig(_prefixed_path(plot_dir, TRAINING_REWARD_FILENAME))
     plt.close(figure)
 
 
@@ -423,7 +568,7 @@ def _save_l1_evolution_plot(plot_dir, reward_evolution):
     axis.grid(True, alpha=0.2)
     axis.legend()
     figure.tight_layout()
-    figure.savefig(plot_dir / L1_EVOLUTION_FILENAME)
+    figure.savefig(_prefixed_path(plot_dir, L1_EVOLUTION_FILENAME))
     plt.close(figure)
 
 
@@ -463,7 +608,7 @@ def _save_sensory_cue_plot(plot_dir, tracked_records):
     axes[0].set_ylabel("Percentage of runs (%)")
     figure.suptitle("Sensory cue distribution across maze runs")
     figure.tight_layout()
-    figure.savefig(plot_dir / SENSORY_CUE_FILENAME)
+    figure.savefig(_prefixed_path(plot_dir, SENSORY_CUE_FILENAME))
     plt.close(figure)
 
 
@@ -478,6 +623,8 @@ def _save_all_plots(run_name, history, debug_pgpe_history):
     colors = _generation_colors(tracked_generations)
 
     _save_decisions_plot(plot_dir, tracked_records)
+    _save_all_decisions_plot(plot_dir, tracked_records, tracked_generations)
+    _save_event_counts_plot(plot_dir, tracked_records, tracked_generations, colors)
     _save_reward_hist_plot(plot_dir, tracked_records, tracked_generations, colors)
     _save_frobenius_plot(plot_dir, tracked_records, tracked_generations, colors)
     _save_weight_distribution_plot(plot_dir, tracked_records, tracked_generations, colors)

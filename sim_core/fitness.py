@@ -129,15 +129,21 @@ def _ascii_hist(values, bin_width, width):
     return "\n".join(lines)
 
 
-def _decision_symbol(decision, crashed, rewarded, big_reward):
-    if crashed:
-        return "x" if decision == -1 else "X"
+def _decision_symbol(decision, crashed, rewarded, correct_arm):
+    """Map one run's outcome to one of the 9 event symbols (or '.' for no event).
+
+    decision: -1 = never turned, 0 = left, 1 = right
+    correct_arm: whether `decision` matches this run's big-reward arm
+                 (only meaningful when decision != -1)
+    """
     if decision == -1:
-        return "."
+        return "x" if crashed else "."
+
+    letter = ("L" if decision == 0 else "R") if correct_arm else ("l" if decision == 0 else "r")
+    if crashed:
+        return letter + "x"
     if rewarded:
-        if big_reward:
-            return "L" if decision == 0 else "R"
-        return "l" if decision == 0 else "r"
+        return letter
     return "."
 
 
@@ -166,7 +172,7 @@ def _print_tracking_block(
     decisions = tracking["decisions_by_run"].detach().cpu()
     crashed = tracking["crashed_by_run"].detach().cpu()
     rewarded = tracking["rewarded_by_run"].detach().cpu()
-    big_reward = tracking["big_reward_by_run"].detach().cpu()
+    correct_arm = tracking["correct_arm_by_run"].detach().cpu()
 
     reward_hist = _ascii_hist(regularized_fitness_cpu, _HIST_BIN_WIDTH, 36)
 
@@ -208,7 +214,7 @@ def _print_tracking_block(
                 int(decisions[net_idx, run_idx].item()),
                 bool(crashed[net_idx, run_idx].item()),
                 bool(rewarded[net_idx, run_idx].item()),
-                bool(big_reward[net_idx, run_idx].item()),
+                bool(correct_arm[net_idx, run_idx].item()),
             ))
         preview_rows.append((f"net_{net_idx}", " ".join(seq)))
     decision_preview_table = _format_table(["Network", f"First {preview_runs} runs"], preview_rows)
@@ -239,7 +245,9 @@ def _print_tracking_block(
     print("Decision summary:")
     print(decisions_table)
     print()
-    print("Decision preview legend: x=crash before turn, X=crash after turn, l/r=small reward, L/R=big reward, .=no event")
+    print("Decision preview legend: x=crash before turn, Lx/Rx=crash after correct L/R turn, "
+          "lx/rx=crash after wrong L/R turn, L/R=correct turn + big reward, "
+          "l/r=wrong turn + small reward, .=no event")
     print(decision_preview_table)
     print("=" * 90)
     print()
@@ -289,6 +297,7 @@ def _record_history(
             "rewarded_by_run": tracking["rewarded_by_run"].detach().cpu().clone(),
             "big_reward_by_run": tracking["big_reward_by_run"].detach().cpu().clone(),
             "sensory_cue_by_run": tracking["sensory_cue_by_run"].detach().cpu().clone(),
+            "correct_arm_by_run": tracking["correct_arm_by_run"].detach().cpu().clone(),
         }
     )
 
