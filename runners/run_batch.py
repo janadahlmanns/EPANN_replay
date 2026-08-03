@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 
 # ==== 1) CONSTANTS / USER INPUTS ================================================
-BATCH_FOLDER = Path("C:/EPANN_replay/runners/batches_to_run")
+BATCH_FOLDER = Path("C:/EPANN_replay/runners/batches_to_run") # put all input json to be run into this folder, script then runs all consecutively
 RUN_EVOLUTION_SCRIPT = Path("C:/EPANN_replay/runners/run_evolution.py")
 
 
