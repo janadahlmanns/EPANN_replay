@@ -1,5 +1,5 @@
 {
-  "master_seed": 0,
+  "master_seed": 25,
   "device": "cuda",
   "noise_seed": 1,
   "reward_seed": 2,
