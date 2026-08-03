@@ -8,6 +8,11 @@ reset to start). The CTRNN state and weights W are NEVER reset between runs or
 maze resets -- only the maze/task bookkeeping (position, reward arm, sensory cue)
 resets. This is what makes the plasticity itself the thing being evolved.
 
+context_cues_on / sensory_cues_on: when False, the corresponding input neurons are
+clipped to zero activity every tick instead of carrying their normal cue value. The
+neurons stay in the network (same neuron count in every condition) -- they are just
+denied any signal, so evolution cannot repurpose them as free processing units.
+
 Reward schedule (see constants.py "REWARD SCHEDULE" section for the full spec):
   - Crashing (choosing straight when a turn is required, or vice versa) always
     costs CRASH_PENALTY and ends the run immediately, no matter which tick it
@@ -27,8 +32,7 @@ import torch
 from sim_core.constants import (
     N_INPUT, OUTPUT_IDX, NOISE_STD, STRAIGHT_THRESH,
     BIG_REWARD, SMALL_REWARD, CRASH_PENALTY,
-    TURN_REWARD_BIG, TURN_REWARD_SMALL,
-    NUM_RUNS_PER_TRAINING_PHASE, MAX_TRAINING_TICKS,
+    TURN_REWARD_BIG, TURN_REWARD_SMALL, TICKS_PER_RUN,
 )
 from sim_core.ctrnn import activation_step, plasticity_step
 
@@ -38,15 +42,32 @@ def _draw_reward_arm(pop, reward_generator, device):
     return torch.randint(0, 2, (pop,), generator=reward_generator, device=device)
 
 
-def _sensory_from_arm(big_reward_arm, context_is_A):
-    """context_is_A: python bool, same context for the whole batch this call."""
-    cue_arm = big_reward_arm if context_is_A else (1 - big_reward_arm)
+def _context_transform_arm(big_reward_arm, context):
+    """Map the rewarded arm to the sensory-cue arm under the given context's rule.
+
+    context "A" = direct mapping (cue points straight at the reward).
+    context "B" = lateral/mirror mapping (cue points at the reflected side).
+    In this single (2-arm) T-maze, "mirror" and "the other arm" happen to be the
+    same operation -- but they will NOT be the same once the double T-maze adds
+    context C (diagonal mapping), so this function -- not a generic "1 - arm"
+    inline -- is the one place that must grow a "C" branch later.
+    """
+    if context == "A":
+        return big_reward_arm
+    if context == "B":
+        return 1 - big_reward_arm
+    raise ValueError(f"Unknown context '{context}'; valid contexts are 'A', 'B'.")
+
+
+def _sensory_from_arm(big_reward_arm, context):
+    """context: python str ('A' or 'B'), same context for the whole batch this call."""
+    cue_arm = _context_transform_arm(big_reward_arm, context)
     sensory_a = (cue_arm == 0).float()
     sensory_b = 1.0 - sensory_a
     return sensory_a, sensory_b
 
 
-def _initialize_training_phase(state, context_is_A, reward_generator, device):
+def _initialize_training_phase(state, context, reward_generator, device):
     pop = state.shape[0]
     state = state.clone()
 
@@ -55,11 +76,11 @@ def _initialize_training_phase(state, context_is_A, reward_generator, device):
     chosen_arm = torch.zeros(pop, dtype=torch.long, device=device)
     total_reward = torch.zeros(pop, device=device)
 
-    context_a = torch.full((pop,), 1.0 if context_is_A else 0.0, device=device)
-    context_b = 1.0 - context_a
+    context_a = torch.full((pop,), 1.0 if context == "A" else 0.0, device=device)
+    context_b = torch.full((pop,), 1.0 if context == "B" else 0.0, device=device)
 
     big_reward_arm = _draw_reward_arm(pop, reward_generator, device)
-    sensory_a, sensory_b = _sensory_from_arm(big_reward_arm, context_is_A)
+    sensory_a, sensory_b = _sensory_from_arm(big_reward_arm, context)
 
     return (
         pop,
@@ -78,9 +99,11 @@ def _initialize_training_phase(state, context_is_A, reward_generator, device):
 
 # ==== MAIN SIMULATION ==========================================================
 def simulate_training_phase(state, W, M, A, B, C, D, beta, eta,
-                             context_is_A, noise_generator, reward_generator, device,
+                             context, num_runs, context_cues_on, sensory_cues_on,
+                             noise_generator, reward_generator, device,
                              collect_tracking=False):
-    """Runs NUM_RUNS_PER_TRAINING_PHASE maze runs (batched over population)."""
+    """Runs num_runs maze runs (batched over population)."""
+    max_ticks = num_runs * TICKS_PER_RUN
     (
         pop,
         state,
@@ -93,7 +116,7 @@ def simulate_training_phase(state, W, M, A, B, C, D, beta, eta,
         big_reward_arm,
         sensory_a,
         sensory_b,
-    ) = _initialize_training_phase(state, context_is_A, reward_generator, device)
+    ) = _initialize_training_phase(state, context, reward_generator, device)
 
     tracking = None
     current_turn_choice = None
@@ -101,30 +124,37 @@ def simulate_training_phase(state, W, M, A, B, C, D, beta, eta,
         current_turn_choice = torch.full((pop,), -1, dtype=torch.long, device=device)
         tracking = {
             # -1 = no turn recorded this run, 0 = left, 1 = right
-            "decisions_by_run": torch.full((pop, NUM_RUNS_PER_TRAINING_PHASE), -1, dtype=torch.long, device=device),
-            "crashed_by_run": torch.zeros((pop, NUM_RUNS_PER_TRAINING_PHASE), dtype=torch.bool, device=device),
-            "rewarded_by_run": torch.zeros((pop, NUM_RUNS_PER_TRAINING_PHASE), dtype=torch.bool, device=device),
+            "decisions_by_run": torch.full((pop, num_runs), -1, dtype=torch.long, device=device),
+            "crashed_by_run": torch.zeros((pop, num_runs), dtype=torch.bool, device=device),
+            "rewarded_by_run": torch.zeros((pop, num_runs), dtype=torch.bool, device=device),
             # kept for backward compatibility -- equals correct_arm_by_run whenever rewarded_by_run is True
-            "big_reward_by_run": torch.zeros((pop, NUM_RUNS_PER_TRAINING_PHASE), dtype=torch.bool, device=device),
-            "sensory_cue_by_run": torch.zeros((pop, NUM_RUNS_PER_TRAINING_PHASE), dtype=torch.long, device=device),
+            "big_reward_by_run": torch.zeros((pop, num_runs), dtype=torch.bool, device=device),
+            "sensory_cue_by_run": torch.zeros((pop, num_runs), dtype=torch.long, device=device),
             # was the direction chosen at the turn tick the run's big-reward arm? only meaningful
             # where decisions_by_run != -1 (i.e. a turn actually happened this run)
-            "correct_arm_by_run": torch.zeros((pop, NUM_RUNS_PER_TRAINING_PHASE), dtype=torch.bool, device=device),
+            "correct_arm_by_run": torch.zeros((pop, num_runs), dtype=torch.bool, device=device),
         }
         tracking["sensory_cue_by_run"][:, 0] = (sensory_b > 0.5).long()
 
-    for _ in range(MAX_TRAINING_TICKS):
-        active = run_count < NUM_RUNS_PER_TRAINING_PHASE
+    for _ in range(max_ticks):
+        active = run_count < num_runs
         if not torch.any(active):
-            break
+            break # break this generation's loop because all individuals allready finished their runs
 
         # --- build this tick's input vector ---
-        is_home = (step_in_run == 1).float()
-        is_turn_tick = step_in_run == 4
-        is_end_tick = step_in_run == 7
+        is_home = (step_in_run == 1).float() # gives 1 for home and 0 otherwise
+        is_turn_tick = step_in_run == 4 # gives True for the turn tick and False otherwise
+        is_end_tick = step_in_run == 7 # gives True for mazeend and False otherwise
+
+        # clip context/sensory neurons to zero activity when their cue is toggled off,
+        # rather than dropping the neurons, so neuron count stays fixed across conditions
+        input_context_a = context_a if context_cues_on else torch.zeros_like(context_a)
+        input_context_b = context_b if context_cues_on else torch.zeros_like(context_b)
+        input_sensory_a = sensory_a if sensory_cues_on else torch.zeros_like(sensory_a)
+        input_sensory_b = sensory_b if sensory_cues_on else torch.zeros_like(sensory_b)
         input_vec = torch.stack(
             [is_home, is_turn_tick.float(), is_end_tick.float(),
-             context_a, context_b, sensory_a, sensory_b], dim=1,
+             input_context_a, input_context_b, input_sensory_a, input_sensory_b], dim=1,
         )
 
         # --- CTRNN tick: clamp inputs, advance state, apply plasticity ---
@@ -194,13 +224,13 @@ def simulate_training_phase(state, W, M, A, B, C, D, beta, eta,
 
         new_arm = _draw_reward_arm(pop, reward_generator, device)
         big_reward_arm = torch.where(terminate, new_arm, big_reward_arm)
-        new_sensory_a, new_sensory_b = _sensory_from_arm(big_reward_arm, context_is_A)
+        new_sensory_a, new_sensory_b = _sensory_from_arm(big_reward_arm, context)
         sensory_a = torch.where(terminate, new_sensory_a, sensory_a)
         sensory_b = torch.where(terminate, new_sensory_b, sensory_b)
 
         if collect_tracking and finished.numel() > 0:
             next_run_idx = run_count[finished]
-            valid = next_run_idx < NUM_RUNS_PER_TRAINING_PHASE
+            valid = next_run_idx < num_runs
             if valid.any():
                 vi = finished[valid]
                 tracking["sensory_cue_by_run"][vi, next_run_idx[valid]] = (new_sensory_b[vi] > 0.5).long()

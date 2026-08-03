@@ -24,17 +24,27 @@ from matplotlib.colors import ListedColormap
 from sim_core.constants import INPUT_SENSORY_A, INPUT_SENSORY_B
 from sim_core.fitness import configure_printing, fitness_function, get_printing_history
 from sim_core.genome_codec import GENOME_LENGTH, GENOME_SPEC
+from sim_core.paradigm import parse_paradigm
 
 # ==== 2) CONSTANTS / USER INPUTS ===============================================
-RUN_NAME = "taskA"
+RUN_NAME = "taskAB"
 DEVICE = "cuda"
-MASTER_SEED = 0
+MASTER_SEED = 1
 NOISE_SEED = 1
 REWARD_SEED = 2
 
-NUM_GENERATIONS = 1000
-SEARCH_POPSIZE = 200
-RADIUS_INIT = 50            # radius of the initial search hypersphere in genome space (GENOME_LENGTH-dim), sweep/ optimize
+EVO_CONTEXT_CUES_ON = True     # if False, context-cue input neurons are clipped to zero during evolution
+EVO_SENSORY_CUES_ON = True     # if False, sensory-cue input neurons are clipped to zero during evolution
+
+# Per-evaluation phase sequence: comma-separated (phase, value) pairs, where phase
+# is one of "trainA"/"trainB" (value = number of maze runs) or "replay" (value =
+# number of ticks). Parsed eagerly below so a malformed string fails at import time.
+PARADIGM = "trainA, 100, replay, 10, trainB, 100"
+PARADIGM_PHASES = parse_paradigm(PARADIGM)
+
+NUM_GENERATIONS = 300
+SEARCH_POPSIZE = 150
+RADIUS_INIT = 30            # radius of the initial search hypersphere in genome space (GENOME_LENGTH-dim), sweep/ optimize
 MAX_SPEED = RADIUS_INIT / 15.0  # evotorch's rule of thumb from the ClipUp paper: max_speed = radius / 15.0, adjust the 15.0 to optimize
 CENTER_LEARNING_RATE = MAX_SPEED / 2  # this is the step size in the ClipUp paper
 STDEV_LEARNING_RATE = 0.1
@@ -42,7 +52,7 @@ MOMENTUM = 0.9
 
 L1_LAMBDA = 1e-3
 
-TRACKED_PER_INTERVAL = 40
+TRACKED_PER_INTERVAL = 50
 MAX_NETWORKS_PREVIEW = 6
 MAX_RUNS_PREVIEW = 20
 HIST_BIN_WIDTH = 1
@@ -531,7 +541,7 @@ def _save_reward_evolution_plot(plot_dir, reward_evolution):
 
 
 def _save_training_reward_evolution_plot(plot_dir, reward_evolution):
-    """Save all-generation line plot for mean, median, and best training reward (task A, pre-L1)."""
+    """Save all-generation line plot for mean, median, and best training reward (summed across all paradigm training phases, pre-L1)."""
     generations = np.array(reward_evolution["generation"])
     mean_tr = np.array(reward_evolution["training_reward_mean"])
     median_tr = np.array(reward_evolution["training_reward_median"])
@@ -541,7 +551,7 @@ def _save_training_reward_evolution_plot(plot_dir, reward_evolution):
     axis.plot(generations, mean_tr, color=REWARD_EVOLUTION_COLORS[0], linewidth=2.0, label="mean")
     axis.plot(generations, median_tr, color=REWARD_EVOLUTION_COLORS[1], linewidth=2.0, label="median")
     axis.plot(generations, best_tr, color=REWARD_EVOLUTION_COLORS[2], linewidth=2.0, label="best")
-    axis.set_title("Training reward evolution across all generations (task A, pre-L1)")
+    axis.set_title("Training reward evolution across all generations (summed across paradigm, pre-L1)")
     axis.set_xlabel("Generation")
     axis.set_ylabel("Training reward")
     axis.grid(True, alpha=0.2)
@@ -655,6 +665,9 @@ objective = functools.partial(
     noise_generator=noise_generator,
     reward_generator=reward_generator,
     l1_lambda=L1_LAMBDA,
+    context_cues_on=EVO_CONTEXT_CUES_ON,
+    sensory_cues_on=EVO_SENSORY_CUES_ON,
+    paradigm_phases=PARADIGM_PHASES,
 )
 
 configure_printing(

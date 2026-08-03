@@ -2,18 +2,18 @@
 continues to run. Continues directly from the state/weights the training phase ended with."""
 
 import torch
-from sim_core.constants import N_INPUT, OUTPUT_IDX, NOISE_STD, REPLAY_TICKS
+from sim_core.constants import N_INPUT, OUTPUT_IDX, NOISE_STD
 from sim_core.ctrnn import activation_step, plasticity_step
 
 
-def simulate_replay_phase(state, W, M, A, B, C, D, beta, eta, noise_generator, device):
-    """Returns (state, W, output_trace) -- output_trace is [REPLAY_TICKS, pop]."""
+def simulate_replay_phase(state, W, M, A, B, C, D, beta, eta, num_ticks, noise_generator, device):
+    """Returns (state, W, output_trace) -- output_trace is [num_ticks, pop]."""
     pop = state.shape[0]
     state = state.clone()
     zero_input = torch.zeros(pop, N_INPUT, device=device)
-    output_trace = torch.zeros(REPLAY_TICKS, pop, device=device)
+    output_trace = torch.zeros(num_ticks, pop, device=device)
 
-    for t in range(REPLAY_TICKS):
+    for t in range(num_ticks):
         state[:, :N_INPUT] = zero_input
         new_state = activation_step(state, W, beta, NOISE_STD, noise_generator)
         dW = plasticity_step(state, W, M, A, B, C, D, eta)

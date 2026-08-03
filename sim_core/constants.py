@@ -24,15 +24,11 @@ NOISE_STD = 0.1
 # ==== MAZE TASK ===============================================================
 STRAIGHT_THRESH = 1.0 / 3.0
 BIG_REWARD = 1.0
-SMALL_REWARD = 0.2 # !!changed from 0.2 as in Soltoggio et al. to try something
+SMALL_REWARD = 0.0 # !!changed from 0.2 as in Soltoggio et al. to try something
 CRASH_PENALTY = -0.4
 TURN_REWARD_BIG = 1.0
 TURN_REWARD_SMALL = 0.0
-
-
-NUM_RUNS_PER_TRAINING_PHASE = 100
 TICKS_PER_RUN = 7                      # 1,2,3=straight 4=turn 5,6,7=straight(7=mazeend)
-MAX_TRAINING_TICKS = NUM_RUNS_PER_TRAINING_PHASE * TICKS_PER_RUN
 
 # arm / sensory-cue / turn-sign mapping:
 #   arm 0 <-> sensory cue "a" <-> turn output <= -STRAIGHT_THRESH
@@ -53,7 +49,3 @@ MAX_TRAINING_TICKS = NUM_RUNS_PER_TRAINING_PHASE * TICKS_PER_RUN
 #   crash after a wrong-arm turn                   -> TURN_REWARD_SMALL + CRASH_PENALTY
 #   full run, correct arm (max payout)             -> TURN_REWARD_BIG + BIG_REWARD
 #   full run, wrong arm                            -> TURN_REWARD_SMALL + SMALL_REWARD
-
-
-# ==== REPLAY PHASE =============================================================
-REPLAY_TICKS = 10

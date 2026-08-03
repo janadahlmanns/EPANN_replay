@@ -6,11 +6,12 @@ from sim_core.constants import N
 from sim_core.fitness_terms import compute_l1_penalty
 from sim_core.genome_codec import unflatten_genome
 from sim_core.maze_task import simulate_training_phase
+from sim_core.paradigm import PHASE_REPLAY, PHASE_TRAIN_A, PHASE_TRAIN_B
 from sim_core.replay_task import assign_replay_reward, simulate_replay_phase
 
 # ==== 1) CONSTANTS ==============================================================
 REPLAY_REWARD_METHOD = "zero"
-TRAINING_CONTEXT_IS_A = True
+PHASE_CONTEXT = {PHASE_TRAIN_A: "A", PHASE_TRAIN_B: "B"}
 
 _TOTAL_GENERATIONS = None
 _PRINT_INTERVAL = None
@@ -302,8 +303,54 @@ def _record_history(
     )
 
 
-# ==== 6) FITNESS EVALUATION =====================================================
-def evaluate_generation(genome_flat, device, noise_generator, reward_generator, l1_lambda):
+# ==== 6) PARADIGM EXECUTION =====================================================
+def _concat_tracking_segments(segments):
+    """Concatenate per-training-phase tracking dicts along the run axis (dim=1),
+    so multiple trainA/trainB phases appear as one chronological run sequence."""
+    return {key: torch.cat([segment[key] for segment in segments], dim=1) for key in segments[0]}
+
+
+def _run_paradigm(genome, paradigm_phases, pop, device, noise_generator, reward_generator, collect_tracking,
+                   context_cues_on, sensory_cues_on):
+    """Runs every (phase_type, value) in paradigm_phases in order, chaining CTRNN
+    state/weights across phases, and returns the summed training and replay reward."""
+    state = torch.zeros(pop, N, device=device)
+    W = genome["W"]
+    training_reward = torch.zeros(pop, device=device)
+    replay_reward = torch.zeros(pop, device=device)
+    tracking_segments = []
+
+    for phase_type, value in paradigm_phases:
+        if phase_type in PHASE_CONTEXT:
+            result = simulate_training_phase(
+                state, W, genome["M"], genome["A"], genome["B"], genome["C"], genome["D"],
+                genome["beta"], genome["eta"], PHASE_CONTEXT[phase_type], value,
+                context_cues_on, sensory_cues_on,
+                noise_generator, reward_generator, device,
+                collect_tracking=collect_tracking,
+            )
+            if collect_tracking:
+                state, W, phase_reward, phase_tracking = result
+                tracking_segments.append(phase_tracking)
+            else:
+                state, W, phase_reward = result
+            training_reward = training_reward + phase_reward
+        elif phase_type == PHASE_REPLAY:
+            state, W, replay_trace = simulate_replay_phase(
+                state, W, genome["M"], genome["A"], genome["B"], genome["C"], genome["D"],
+                genome["beta"], genome["eta"], value, noise_generator, device,
+            )
+            replay_reward = replay_reward + assign_replay_reward(replay_trace, REPLAY_REWARD_METHOD)
+        else:
+            raise ValueError(f"Unknown phase type '{phase_type}' in paradigm.")
+
+    tracking = _concat_tracking_segments(tracking_segments) if collect_tracking else None
+    return W, training_reward, replay_reward, tracking
+
+
+# ==== 7) FITNESS EVALUATION =====================================================
+def evaluate_generation(genome_flat, device, noise_generator, reward_generator, l1_lambda,
+                         context_cues_on, sensory_cues_on, paradigm_phases):
     evaluation_idx = len(_REWARD_EVOLUTION["generation"]) + 1
     should_print = _should_print(evaluation_idx)
 
@@ -311,34 +358,16 @@ def evaluate_generation(genome_flat, device, noise_generator, reward_generator, 
     pop = genome_flat.shape[0]
     genome = unflatten_genome(genome_flat, pop)
 
-    state0 = torch.zeros(pop, N, device=device)
-    tracking = None
-    if should_print:
-        frob_start = torch.linalg.matrix_norm(genome["W"], ord="fro", dim=(1, 2))
-        state, W_after_training, training_reward, tracking = simulate_training_phase(
-            state0, genome["W"], genome["M"], genome["A"], genome["B"], genome["C"], genome["D"],
-            genome["beta"], genome["eta"], TRAINING_CONTEXT_IS_A,
-            noise_generator, reward_generator, device,
-            collect_tracking=True,
-        )
-    else:
-        state, W_after_training, training_reward = simulate_training_phase(
-            state0, genome["W"], genome["M"], genome["A"], genome["B"], genome["C"], genome["D"],
-            genome["beta"], genome["eta"], TRAINING_CONTEXT_IS_A,
-            noise_generator, reward_generator, device,
-        )
-        frob_start = torch.linalg.matrix_norm(genome["W"], ord="fro", dim=(1, 2))
-
-    _, W_after_replay, replay_trace = simulate_replay_phase(
-        state, W_after_training, genome["M"], genome["A"], genome["B"], genome["C"], genome["D"],
-        genome["beta"], genome["eta"], noise_generator, device,
+    frob_start = torch.linalg.matrix_norm(genome["W"], ord="fro", dim=(1, 2))
+    W_final, training_reward, replay_reward, tracking = _run_paradigm(
+        genome, paradigm_phases, pop, device, noise_generator, reward_generator, should_print,
+        context_cues_on, sensory_cues_on,
     )
 
-    replay_reward = assign_replay_reward(replay_trace, REPLAY_REWARD_METHOD)
     unregularized_reward = training_reward + replay_reward
     complexity, l1_penalty = compute_l1_penalty(genome_flat, l1_lambda)
     regularized_fitness = unregularized_reward - l1_penalty
-    frob_end = torch.linalg.matrix_norm(W_after_replay, ord="fro", dim=(1, 2))
+    frob_end = torch.linalg.matrix_norm(W_final, ord="fro", dim=(1, 2))
     frob_delta = frob_end - frob_start
 
     if should_print:
@@ -363,7 +392,7 @@ def evaluate_generation(genome_flat, device, noise_generator, reward_generator, 
             frob_start.detach().cpu(),
             frob_end.detach().cpu(),
             genome["W"].detach().cpu(),
-            W_after_replay.detach().cpu(),
+            W_final.detach().cpu(),
             tracking,
         )
     else:
@@ -382,6 +411,8 @@ def evaluate_generation(genome_flat, device, noise_generator, reward_generator, 
     return regularized_fitness
 
 
-def fitness_function(genome_flat, device, noise_generator, reward_generator, l1_lambda):
+def fitness_function(genome_flat, device, noise_generator, reward_generator, l1_lambda,
+                      context_cues_on, sensory_cues_on, paradigm_phases):
     """Vectorized EvoTorch objective entrypoint."""
-    return evaluate_generation(genome_flat, device, noise_generator, reward_generator, l1_lambda)
+    return evaluate_generation(genome_flat, device, noise_generator, reward_generator, l1_lambda,
+                                context_cues_on, sensory_cues_on, paradigm_phases)
