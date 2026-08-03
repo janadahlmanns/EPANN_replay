@@ -1,7 +1,7 @@
 """Batched CTRNN activation and neuromodulated plasticity update, 1:1 with the skeleton equations."""
 
 import torch
-from sim_core.constants import DT, TAU
+from sim_core import constants
 
 
 def activation_step(state, W, beta, noise_std, generator):
@@ -9,7 +9,7 @@ def activation_step(state, W, beta, noise_std, generator):
     input-neuron entries afterward, since this applies the ODE update to every neuron."""
     net_input = torch.einsum("bij,bj->bi", W, state) + beta
     noise = torch.randn(net_input.shape, generator=generator, device=net_input.device) * noise_std
-    new_state = state + (DT / TAU) * (-state + torch.tanh(net_input + noise))
+    new_state = state + (constants.DT / constants.TAU) * (-state + torch.tanh(net_input + noise))
     return new_state
 
 

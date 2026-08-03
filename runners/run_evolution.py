@@ -10,7 +10,9 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import functools
+import json
 import math
+import shutil
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -21,42 +23,73 @@ from evotorch.algorithms import PGPE
 from evotorch.logging import StdOutLogger
 from matplotlib.colors import ListedColormap
 
+from sim_core import constants
 from sim_core.constants import INPUT_SENSORY_A, INPUT_SENSORY_B
 from sim_core.fitness import configure_printing, fitness_function, get_printing_history
 from sim_core.genome_codec import GENOME_LENGTH, GENOME_SPEC
-from sim_core.paradigm import parse_paradigm
+from sim_core.paradigm import PHASE_REPLAY, parse_paradigm
 
-# ==== 2) CONSTANTS / USER INPUTS ===============================================
-RUN_NAME = "taskAB"
-DEVICE = "cuda"
-MASTER_SEED = 1
-NOISE_SEED = 1
-REWARD_SEED = 2
+# ==== 2) CONFIG LOADING =========================================================
+# Every experiment parameter lives in a JSON config file (see batches_to_run/ for
+# examples), passed as the sole CLI argument. No defaults/fallbacks here -- a
+# missing or malformed config field fails loudly (KeyError), on purpose.
+if len(sys.argv) != 2:
+    raise ValueError("Usage: python run_evolution.py <path/to/config.json>")
+CONFIG_PATH = Path(sys.argv[1])
+with open(CONFIG_PATH, "r", encoding="utf-8") as _config_file:
+    CONFIG = json.load(_config_file)
 
-EVO_CONTEXT_CUES_ON = True     # if False, context-cue input neurons are clipped to zero during evolution
-EVO_SENSORY_CUES_ON = True     # if False, sensory-cue input neurons are clipped to zero during evolution
+RUN_NAME = CONFIG_PATH.stem  # output folder always matches the input config file's name
+DEVICE = CONFIG["device"]
+MASTER_SEED = CONFIG["master_seed"]
+NOISE_SEED = CONFIG["noise_seed"]
+REWARD_SEED = CONFIG["reward_seed"]
+TEST_SEED = CONFIG["test_seed"]  # dedicated RNG stream for cue-importance measurement only -- never
+                                  # touches noise_generator/reward_generator, so the tracking interval
+                                  # can't change the run
+
+EVO_CONTEXT_CUES_ON = CONFIG["evo_context_cues_on"]  # if False, context-cue input neurons are clipped to zero during evolution
+EVO_SENSORY_CUES_ON = CONFIG["evo_sensory_cues_on"]  # if False, sensory-cue input neurons are clipped to zero during evolution
 
 # Per-evaluation phase sequence: comma-separated (phase, value) pairs, where phase
 # is one of "trainA"/"trainB" (value = number of maze runs) or "replay" (value =
 # number of ticks). Parsed eagerly below so a malformed string fails at import time.
-PARADIGM = "trainA, 100, replay, 10, trainB, 100"
+PARADIGM = CONFIG["paradigm"]
 PARADIGM_PHASES = parse_paradigm(PARADIGM)
+# ordered list of (phase_type, num_runs) for training phases only, replay skipped --
+# this must stay in the same order fitness.py concatenates tracking segments in
+TRAINING_PHASE_LAYOUT = [(phase_type, value) for phase_type, value in PARADIGM_PHASES if phase_type != PHASE_REPLAY]
 
-NUM_GENERATIONS = 300
-SEARCH_POPSIZE = 150
-RADIUS_INIT = 30            # radius of the initial search hypersphere in genome space (GENOME_LENGTH-dim), sweep/ optimize
-MAX_SPEED = RADIUS_INIT / 15.0  # evotorch's rule of thumb from the ClipUp paper: max_speed = radius / 15.0, adjust the 15.0 to optimize
-CENTER_LEARNING_RATE = MAX_SPEED / 2  # this is the step size in the ClipUp paper
-STDEV_LEARNING_RATE = 0.1
-MOMENTUM = 0.9
+NUM_GENERATIONS = CONFIG["num_generations"]
+SEARCH_POPSIZE = CONFIG["search_popsize"]
+RADIUS_INIT = CONFIG["radius_init"]     # radius of the initial search hypersphere in genome space (GENOME_LENGTH-dim), sweep/ optimize
+MAX_SPEED = RADIUS_INIT / 15.0          # evotorch's rule of thumb from the ClipUp paper: max_speed = radius / 15.0, adjust the 15.0 to optimize
+CENTER_LEARNING_RATE = MAX_SPEED / 2    # this is the step size in the ClipUp paper
+STDEV_LEARNING_RATE = CONFIG["stdev_learning_rate"]
+MOMENTUM = CONFIG["momentum"]
 
-L1_LAMBDA = 1e-3
+L1_LAMBDA = CONFIG["l1_lambda"]
 
-TRACKED_PER_INTERVAL = 50
-MAX_NETWORKS_PREVIEW = 6
-MAX_RUNS_PREVIEW = 20
-HIST_BIN_WIDTH = 1
-PLOT_DPI = 180
+TRACKED_PER_INTERVAL = CONFIG["tracked_per_interval"]
+MAX_NETWORKS_PREVIEW = CONFIG["max_networks_preview"]
+MAX_RUNS_PREVIEW = CONFIG["max_runs_preview"]
+HIST_BIN_WIDTH = CONFIG["hist_bin_width"]
+PLOT_DPI = 180  # presentation-only, not an experiment parameter -- stays fixed
+
+# Tunable sim_core constants (reward shaping + CTRNN dynamics) -- set once, here,
+# before any simulation code runs; sim_core modules read constants.X live at call
+# time, so this is the only place that needs to know about the config file.
+constants.configure(
+    dt=CONFIG["dt"],
+    tau=CONFIG["tau"],
+    noise_std=CONFIG["noise_std"],
+    straight_thresh=CONFIG["straight_thresh"],
+    big_reward=CONFIG["big_reward"],
+    small_reward=CONFIG["small_reward"],
+    crash_penalty=CONFIG["crash_penalty"],
+    turn_reward_big=CONFIG["turn_reward_big"],
+    turn_reward_small=CONFIG["turn_reward_small"],
+)
 
 PLOTS_ROOT = Path("C:/EPANN_replay/data/plots")
 DECISIONS_FILENAME = "decisions.png"
@@ -69,6 +102,7 @@ REWARD_EVOLUTION_FILENAME = "reward_evolution.png"
 SENSORY_CUE_FILENAME = "sensory_cues.png"
 TRAINING_REWARD_FILENAME = "training_reward_evolution.png"
 L1_EVOLUTION_FILENAME = "l1_evolution.png"
+INPUT_WEIGHING_FILENAME = "input_weighing.png"
 DEBUG_PGPE_PARAMS_FILENAME = "debug_pgpe_params.png"
 DEBUG_PGPE_FITNESS_FILENAME = "debug_pgpe_fitness.png"
 REWARD_EVOLUTION_COLORS = ["#E07A5F", "#3D405B", "#81B29A"]
@@ -382,48 +416,63 @@ def _save_all_decisions_plot(plot_dir, tracked_records, tracked_generations):
 
 
 def _save_event_counts_plot(plot_dir, tracked_records, tracked_generations, colors):
-    """Save a grouped bar plot: one group per tracked generation, with one bar per event
-    (x, Lx, Rx, lx, rx, L, R, l, r) in each group, showing what % of that generation's
-    events each event type accounted for."""
+    """Save a grid of grouped bar plots, one row per training-phase segment in
+    TRAINING_PHASE_LAYOUT (replay segments skipped). Each row is a group per tracked
+    generation, with one bar per event (x, Lx, Rx, lx, rx, L, R, l, r), showing what %
+    of that generation's events -- within that training-phase segment's runs only --
+    each event type accounted for."""
     event_labels = DECISION_LABELS[1:]  # exclude "." (not a real event, just padding)
     event_colors = DECISION_COLORS[1:]  # same event -> color mapping as the decision heatmaps
     n_events = len(event_labels)
     n_gens = len(tracked_records)
+    n_rows = len(TRAINING_PHASE_LAYOUT)
 
-    counts = np.zeros((n_gens, n_events), dtype=int)
-    for g_idx, record in enumerate(tracked_records):
-        matrix = _decision_category_matrix(record)  # counts don't depend on fitness sort order
-        for e_idx in range(n_events):
-            counts[g_idx, e_idx] = int((matrix == e_idx + 1).sum())
-
-    # percentage of that generation's events (the 9 real event types only -- "." padding
-    # is excluded from both the numerator and the denominator), so each generation's bars
-    # sum to 100% regardless of how many runs actually completed.
-    totals = counts.sum(axis=1, keepdims=True)
-    percentages = np.divide(counts, totals, out=np.zeros_like(counts, dtype=float), where=totals != 0) * 100.0
+    # cumulative run-index boundaries for each phase segment, matching the order
+    # fitness.py's _concat_tracking_segments concatenated them in
+    run_start = 0
+    phase_run_ranges = []
+    for phase_type, num_runs in TRAINING_PHASE_LAYOUT:
+        phase_run_ranges.append((phase_type, run_start, run_start + num_runs))
+        run_start += num_runs
 
     fig_w = max(12.0, n_events * n_gens * 0.35)
-    figure, axis = plt.subplots(nrows=1, ncols=1, figsize=(fig_w, 6), dpi=PLOT_DPI)
+    figure, axes = plt.subplots(nrows=n_rows, ncols=1, figsize=(fig_w, 6 * n_rows), dpi=PLOT_DPI, squeeze=False)
 
     group_width = 0.8
     bar_width = group_width / n_events
     x_base = np.arange(n_gens)
 
-    for e_idx in range(n_events):
-        offset = (e_idx - (n_events - 1) / 2) * bar_width
-        axis.bar(
-            x_base + offset, percentages[:, e_idx], width=bar_width,
-            color=event_colors[e_idx], edgecolor="#333333", linewidth=0.3,
-            label=event_labels[e_idx],
-        )
+    for row_idx, (phase_type, seg_start, seg_end) in enumerate(phase_run_ranges):
+        axis = axes[row_idx, 0]
+        counts = np.zeros((n_gens, n_events), dtype=int)
+        for g_idx, record in enumerate(tracked_records):
+            matrix = _decision_category_matrix(record)[:, seg_start:seg_end]  # counts don't depend on fitness sort order
+            for e_idx in range(n_events):
+                counts[g_idx, e_idx] = int((matrix == e_idx + 1).sum())
 
-    axis.set_xticks(x_base)
-    axis.set_xticklabels([f"gen {g}" for g in tracked_generations])
-    axis.set_xlabel("Generation")
-    axis.set_ylabel("% of events in generation")
-    axis.set_title("Event distribution (%) across tracked generations")
-    axis.grid(True, axis="y", alpha=0.2)
-    axis.legend(ncol=min(n_events, 9), fontsize=8)
+        # percentage of that generation's events (the 9 real event types only -- "." padding
+        # is excluded from both the numerator and the denominator), so each generation's bars
+        # sum to 100% regardless of how many runs actually completed.
+        totals = counts.sum(axis=1, keepdims=True)
+        percentages = np.divide(counts, totals, out=np.zeros_like(counts, dtype=float), where=totals != 0) * 100.0
+
+        for e_idx in range(n_events):
+            offset = (e_idx - (n_events - 1) / 2) * bar_width
+            axis.bar(
+                x_base + offset, percentages[:, e_idx], width=bar_width,
+                color=event_colors[e_idx], edgecolor="#333333", linewidth=0.3,
+                label=event_labels[e_idx] if row_idx == 0 else None,
+            )
+
+        axis.set_xticks(x_base)
+        axis.set_xticklabels([f"gen {g}" for g in tracked_generations])
+        axis.set_xlabel("Generation")
+        axis.set_ylabel("% of events in generation")
+        axis.set_title(f"{phase_type} (runs {seg_start}-{seg_end - 1})")
+        axis.grid(True, axis="y", alpha=0.2)
+
+    axes[0, 0].legend(ncol=min(n_events, 9), fontsize=8)
+    figure.suptitle("Event distribution (%) by training phase across tracked generations")
     figure.tight_layout()
     figure.savefig(_prefixed_path(plot_dir, EVENT_COUNTS_FILENAME))
     plt.close(figure)
@@ -582,6 +631,35 @@ def _save_l1_evolution_plot(plot_dir, reward_evolution):
     plt.close(figure)
 
 
+def _save_input_weighing_plot(plot_dir, cue_importance_history):
+    """Save tracked-generation line plot of ablation-based cue importance: how much
+    unregularized reward is lost when the context cue (resp. sensory cue) is clipped
+    to zero, relative to the actual evaluation condition. Near zero means the network
+    isn't using that cue at all; a large drop means it depends on it heavily."""
+    generations = np.array(cue_importance_history["generation"])
+    context_mean = np.array(cue_importance_history["context_importance_mean"])
+    context_min = np.array(cue_importance_history["context_importance_min"])
+    context_max = np.array(cue_importance_history["context_importance_max"])
+    sensory_mean = np.array(cue_importance_history["sensory_importance_mean"])
+    sensory_min = np.array(cue_importance_history["sensory_importance_min"])
+    sensory_max = np.array(cue_importance_history["sensory_importance_max"])
+
+    figure, axis = plt.subplots(nrows=1, ncols=1, figsize=(10, 6), dpi=PLOT_DPI)
+    axis.plot(generations, context_mean, color=REWARD_EVOLUTION_COLORS[0], linewidth=2.0, label="context cue")
+    axis.fill_between(generations, context_min, context_max, color=REWARD_EVOLUTION_COLORS[0], alpha=0.15)
+    axis.plot(generations, sensory_mean, color=REWARD_EVOLUTION_COLORS[2], linewidth=2.0, label="sensory cue")
+    axis.fill_between(generations, sensory_min, sensory_max, color=REWARD_EVOLUTION_COLORS[2], alpha=0.15)
+    axis.axhline(0.0, color="#888888", linewidth=1.0, linestyle="--")
+    axis.set_title("Input cue importance across tracked generations (reward lost when cue is ablated)")
+    axis.set_xlabel("Generation")
+    axis.set_ylabel("Reward lost when cue is clipped to zero")
+    axis.grid(True, alpha=0.2)
+    axis.legend()
+    figure.tight_layout()
+    figure.savefig(_prefixed_path(plot_dir, INPUT_WEIGHING_FILENAME))
+    plt.close(figure)
+
+
 def _save_sensory_cue_plot(plot_dir, tracked_records):
     """Save side-by-side bar charts of sensory cue distribution for first and last tracked generation."""
     first_record = tracked_records[0]
@@ -623,13 +701,16 @@ def _save_sensory_cue_plot(plot_dir, tracked_records):
 
 
 def _save_all_plots(run_name, history, debug_pgpe_history):
-    """Create output folder and save all tracking plots."""
+    """Create output folder, copy the config file used for this run into it for
+    reproducibility, and save all tracking plots."""
     plot_dir = PLOTS_ROOT / run_name
     plot_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(CONFIG_PATH, plot_dir / CONFIG_PATH.name)
 
     tracked_generations = history["tracked_generations"]
     tracked_records = history["tracked_records"]
     reward_evolution = history["reward_evolution"]
+    cue_importance_history = history["cue_importance_history"]
     colors = _generation_colors(tracked_generations)
 
     _save_decisions_plot(plot_dir, tracked_records)
@@ -641,6 +722,7 @@ def _save_all_plots(run_name, history, debug_pgpe_history):
     _save_reward_evolution_plot(plot_dir, reward_evolution)
     _save_training_reward_evolution_plot(plot_dir, reward_evolution)
     _save_l1_evolution_plot(plot_dir, reward_evolution)
+    _save_input_weighing_plot(plot_dir, cue_importance_history)
     _save_sensory_cue_plot(plot_dir, tracked_records)
     _save_debug_pgpe_params_plot(plot_dir, debug_pgpe_history)
     _save_debug_pgpe_fitness_plot(plot_dir, debug_pgpe_history)
@@ -656,6 +738,8 @@ noise_generator = torch.Generator(device=DEVICE)
 noise_generator.manual_seed(NOISE_SEED)
 reward_generator = torch.Generator(device=DEVICE)
 reward_generator.manual_seed(REWARD_SEED)
+test_generator = torch.Generator(device=DEVICE)
+test_generator.manual_seed(TEST_SEED)
 
 center_init = torch.zeros(GENOME_LENGTH, device=DEVICE)
 
@@ -664,6 +748,7 @@ objective = functools.partial(
     device=DEVICE,
     noise_generator=noise_generator,
     reward_generator=reward_generator,
+    test_generator=test_generator,
     l1_lambda=L1_LAMBDA,
     context_cues_on=EVO_CONTEXT_CUES_ON,
     sensory_cues_on=EVO_SENSORY_CUES_ON,

@@ -16,19 +16,43 @@ INPUT_CONTEXT_B = 4
 INPUT_SENSORY_A = 5
 INPUT_SENSORY_B = 6
 
-# ==== CTRNN DYNAMICS ==========================================================
-DT = 0.2
-TAU = 1.0
-NOISE_STD = 0.1
+# ==== TUNABLE SIMULATION CONSTANTS ============================================
+# These are per-run experiment parameters, not fixed structure: they start as
+# None and MUST be set via configure() (called once from the runner, from its
+# loaded config file) before any sim_core module reads them. Other sim_core
+# modules import the `constants` module itself (not these names directly) and
+# read e.g. `constants.NOISE_STD` at call time, so configure() only needs to run
+# before the simulation actually executes, not before these modules are imported.
+DT = None
+TAU = None
+NOISE_STD = None
+STRAIGHT_THRESH = None
+BIG_REWARD = None
+SMALL_REWARD = None
+CRASH_PENALTY = None
+TURN_REWARD_BIG = None
+TURN_REWARD_SMALL = None
 
-# ==== MAZE TASK ===============================================================
-STRAIGHT_THRESH = 1.0 / 3.0
-BIG_REWARD = 1.0
-SMALL_REWARD = 0.0 # !!changed from 0.2 as in Soltoggio et al. to try something
-CRASH_PENALTY = -0.4
-TURN_REWARD_BIG = 1.0
-TURN_REWARD_SMALL = 0.0
-TICKS_PER_RUN = 7                      # 1,2,3=straight 4=turn 5,6,7=straight(7=mazeend)
+TICKS_PER_RUN = 7                      # fixed: maze_task.py's turn/end-tick checks are
+                                        # hardcoded to this length (1,2,3=straight 4=turn
+                                        # 5,6,7=straight(7=mazeend)), so this is structural,
+                                        # not a tunable experiment parameter
+
+
+def configure(dt, tau, noise_std, straight_thresh, big_reward, small_reward,
+              crash_penalty, turn_reward_big, turn_reward_small):
+    """Set all tunable simulation constants for this run (called once by the runner)."""
+    global DT, TAU, NOISE_STD, STRAIGHT_THRESH, BIG_REWARD, SMALL_REWARD
+    global CRASH_PENALTY, TURN_REWARD_BIG, TURN_REWARD_SMALL
+    DT = dt
+    TAU = tau
+    NOISE_STD = noise_std
+    STRAIGHT_THRESH = straight_thresh
+    BIG_REWARD = big_reward
+    SMALL_REWARD = small_reward
+    CRASH_PENALTY = crash_penalty
+    TURN_REWARD_BIG = turn_reward_big
+    TURN_REWARD_SMALL = turn_reward_small
 
 # arm / sensory-cue / turn-sign mapping:
 #   arm 0 <-> sensory cue "a" <-> turn output <= -STRAIGHT_THRESH

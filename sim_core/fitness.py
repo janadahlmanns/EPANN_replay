@@ -34,6 +34,15 @@ _REWARD_EVOLUTION = {
     "l1_penalty_median": [],
     "l1_penalty_best": [],
 }
+_CUE_IMPORTANCE_HISTORY = {
+    "generation": [],
+    "context_importance_mean": [],
+    "context_importance_min": [],
+    "context_importance_max": [],
+    "sensory_importance_mean": [],
+    "sensory_importance_min": [],
+    "sensory_importance_max": [],
+}
 
 
 # ==== 2) PUBLIC CONTROL + HISTORY ACCESS =======================================
@@ -47,7 +56,7 @@ def configure_printing(
     """Set printing cadence and clear history buffers for a fresh run."""
     global _TOTAL_GENERATIONS, _PRINT_INTERVAL
     global _MAX_NETWORKS_PREVIEW, _MAX_RUNS_PREVIEW, _HIST_BIN_WIDTH
-    global _TRACKED_GENERATIONS, _TRACKED_RECORDS, _REWARD_EVOLUTION
+    global _TRACKED_GENERATIONS, _TRACKED_RECORDS, _REWARD_EVOLUTION, _CUE_IMPORTANCE_HISTORY
 
     _TOTAL_GENERATIONS = total_generations
     _PRINT_INTERVAL = print_interval
@@ -70,6 +79,15 @@ def configure_printing(
         "l1_penalty_median": [],
         "l1_penalty_best": [],
     }
+    _CUE_IMPORTANCE_HISTORY = {
+        "generation": [],
+        "context_importance_mean": [],
+        "context_importance_min": [],
+        "context_importance_max": [],
+        "sensory_importance_mean": [],
+        "sensory_importance_min": [],
+        "sensory_importance_max": [],
+    }
 
 
 def get_printing_history():
@@ -78,6 +96,7 @@ def get_printing_history():
         "tracked_generations": _TRACKED_GENERATIONS,
         "tracked_records": _TRACKED_RECORDS,
         "reward_evolution": _REWARD_EVOLUTION,
+        "cue_importance_history": _CUE_IMPORTANCE_HISTORY,
     }
 
 
@@ -303,6 +322,19 @@ def _record_history(
     )
 
 
+def _record_cue_importance(evaluation_idx, context_importance, sensory_importance):
+    """Store one tracked generation's context/sensory cue importance distribution."""
+    context_cpu = context_importance.detach().cpu()
+    sensory_cpu = sensory_importance.detach().cpu()
+    _CUE_IMPORTANCE_HISTORY["generation"].append(evaluation_idx)
+    _CUE_IMPORTANCE_HISTORY["context_importance_mean"].append(float(context_cpu.mean().item()))
+    _CUE_IMPORTANCE_HISTORY["context_importance_min"].append(float(context_cpu.min().item()))
+    _CUE_IMPORTANCE_HISTORY["context_importance_max"].append(float(context_cpu.max().item()))
+    _CUE_IMPORTANCE_HISTORY["sensory_importance_mean"].append(float(sensory_cpu.mean().item()))
+    _CUE_IMPORTANCE_HISTORY["sensory_importance_min"].append(float(sensory_cpu.min().item()))
+    _CUE_IMPORTANCE_HISTORY["sensory_importance_max"].append(float(sensory_cpu.max().item()))
+
+
 # ==== 6) PARADIGM EXECUTION =====================================================
 def _concat_tracking_segments(segments):
     """Concatenate per-training-phase tracking dicts along the run axis (dim=1),
@@ -310,14 +342,16 @@ def _concat_tracking_segments(segments):
     return {key: torch.cat([segment[key] for segment in segments], dim=1) for key in segments[0]}
 
 
-def _run_paradigm(genome, paradigm_phases, pop, device, noise_generator, reward_generator, collect_tracking,
-                   context_cues_on, sensory_cues_on):
-    """Runs every (phase_type, value) in paradigm_phases in order, chaining CTRNN
-    state/weights across phases, and returns the summed training and replay reward."""
-    state = torch.zeros(pop, N, device=device)
-    W = genome["W"]
-    training_reward = torch.zeros(pop, device=device)
-    replay_reward = torch.zeros(pop, device=device)
+def _run_paradigm(genome, paradigm_phases, device, noise_generator, reward_generator, collect_tracking,
+                   context_cues_on, sensory_cues_on, state, W):
+    """Runs every (phase_type, value) in paradigm_phases in order, starting from the
+    given (state, W) and chaining CTRNN state/weights across phases. Returns the
+    final (state, W) plus the summed training and replay reward. Never mutates the
+    state/W tensors passed in -- simulate_training_phase/simulate_replay_phase both
+    clone-or-recompute rather than mutate in place -- so the same (state, W) can
+    safely be reused as a starting checkpoint across multiple independent calls."""
+    training_reward = torch.zeros(state.shape[0], device=device)
+    replay_reward = torch.zeros(state.shape[0], device=device)
     tracking_segments = []
 
     for phase_type, value in paradigm_phases:
@@ -345,11 +379,45 @@ def _run_paradigm(genome, paradigm_phases, pop, device, noise_generator, reward_
             raise ValueError(f"Unknown phase type '{phase_type}' in paradigm.")
 
     tracking = _concat_tracking_segments(tracking_segments) if collect_tracking else None
-    return W, training_reward, replay_reward, tracking
+    return state, W, training_reward, replay_reward, tracking
+
+
+def _measure_cue_importance(genome, paradigm_phases, device, test_generator,
+                             context_cues_on, sensory_cues_on, state_checkpoint, W_checkpoint):
+    """Ablation importance: reward lost when one cue channel is clipped to zero,
+    measured by continuing the SAME paradigm shape once more from the real
+    post-evaluation (state_checkpoint, W_checkpoint) -- i.e. probing what the
+    actually-trained network does, not a network retrained from scratch.
+
+    Uses test_generator exclusively (never the evolutionary noise/reward
+    generators), so this diagnostic draws no randomness from and has zero effect
+    on the main evolutionary RNG stream. All three probes (baseline + two
+    ablations) are replayed from the identical test_generator state, so they see
+    the same maze draws/noise and differ only in which cue is ablated. Every
+    probe's resulting state/W is discarded once its reward is read out -- nothing
+    from testing carries out into the real evaluation, only the checkpoint carries in.
+    """
+    checkpoint_rng_state = test_generator.get_state()
+
+    def _probe(probe_context_cues_on, probe_sensory_cues_on):
+        test_generator.set_state(checkpoint_rng_state)
+        _, _, probe_training_reward, probe_replay_reward, _ = _run_paradigm(
+            genome, paradigm_phases, device, test_generator, test_generator, False,
+            probe_context_cues_on, probe_sensory_cues_on, state_checkpoint, W_checkpoint,
+        )
+        return probe_training_reward + probe_replay_reward
+
+    baseline_reward = _probe(context_cues_on, sensory_cues_on)
+    context_ablated_reward = _probe(False, sensory_cues_on)
+    sensory_ablated_reward = _probe(context_cues_on, False)
+
+    context_importance = baseline_reward - context_ablated_reward
+    sensory_importance = baseline_reward - sensory_ablated_reward
+    return context_importance, sensory_importance
 
 
 # ==== 7) FITNESS EVALUATION =====================================================
-def evaluate_generation(genome_flat, device, noise_generator, reward_generator, l1_lambda,
+def evaluate_generation(genome_flat, device, noise_generator, reward_generator, test_generator, l1_lambda,
                          context_cues_on, sensory_cues_on, paradigm_phases):
     evaluation_idx = len(_REWARD_EVOLUTION["generation"]) + 1
     should_print = _should_print(evaluation_idx)
@@ -359,9 +427,10 @@ def evaluate_generation(genome_flat, device, noise_generator, reward_generator, 
     genome = unflatten_genome(genome_flat, pop)
 
     frob_start = torch.linalg.matrix_norm(genome["W"], ord="fro", dim=(1, 2))
-    W_final, training_reward, replay_reward, tracking = _run_paradigm(
-        genome, paradigm_phases, pop, device, noise_generator, reward_generator, should_print,
-        context_cues_on, sensory_cues_on,
+    state0 = torch.zeros(pop, N, device=device)
+    state_final, W_final, training_reward, replay_reward, tracking = _run_paradigm(
+        genome, paradigm_phases, device, noise_generator, reward_generator, should_print,
+        context_cues_on, sensory_cues_on, state0, genome["W"],
     )
 
     unregularized_reward = training_reward + replay_reward
@@ -395,6 +464,11 @@ def evaluate_generation(genome_flat, device, noise_generator, reward_generator, 
             W_final.detach().cpu(),
             tracking,
         )
+        context_importance, sensory_importance = _measure_cue_importance(
+            genome, paradigm_phases, device, test_generator,
+            context_cues_on, sensory_cues_on, state_final, W_final,
+        )
+        _record_cue_importance(evaluation_idx, context_importance, sensory_importance)
     else:
         _record_history(
             evaluation_idx,
@@ -411,8 +485,8 @@ def evaluate_generation(genome_flat, device, noise_generator, reward_generator, 
     return regularized_fitness
 
 
-def fitness_function(genome_flat, device, noise_generator, reward_generator, l1_lambda,
+def fitness_function(genome_flat, device, noise_generator, reward_generator, test_generator, l1_lambda,
                       context_cues_on, sensory_cues_on, paradigm_phases):
     """Vectorized EvoTorch objective entrypoint."""
-    return evaluate_generation(genome_flat, device, noise_generator, reward_generator, l1_lambda,
+    return evaluate_generation(genome_flat, device, noise_generator, reward_generator, test_generator, l1_lambda,
                                 context_cues_on, sensory_cues_on, paradigm_phases)

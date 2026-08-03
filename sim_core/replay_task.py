@@ -2,7 +2,8 @@
 continues to run. Continues directly from the state/weights the training phase ended with."""
 
 import torch
-from sim_core.constants import N_INPUT, OUTPUT_IDX, NOISE_STD
+from sim_core import constants
+from sim_core.constants import N_INPUT, OUTPUT_IDX
 from sim_core.ctrnn import activation_step, plasticity_step
 
 
@@ -15,7 +16,7 @@ def simulate_replay_phase(state, W, M, A, B, C, D, beta, eta, num_ticks, noise_g
 
     for t in range(num_ticks):
         state[:, :N_INPUT] = zero_input
-        new_state = activation_step(state, W, beta, NOISE_STD, noise_generator)
+        new_state = activation_step(state, W, beta, constants.NOISE_STD, noise_generator)
         dW = plasticity_step(state, W, M, A, B, C, D, eta)
         W = W + dW
         W = W / W.abs().amax(dim=(1, 2), keepdim=True).clamp(min=1e-8)

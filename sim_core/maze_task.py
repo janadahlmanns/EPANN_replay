@@ -13,7 +13,7 @@ clipped to zero activity every tick instead of carrying their normal cue value. 
 neurons stay in the network (same neuron count in every condition) -- they are just
 denied any signal, so evolution cannot repurpose them as free processing units.
 
-Reward schedule (see constants.py "REWARD SCHEDULE" section for the full spec):
+Reward schedule (see constants.py "TUNABLE SIMULATION CONSTANTS" section for the full spec):
   - Crashing (choosing straight when a turn is required, or vice versa) always
     costs CRASH_PENALTY and ends the run immediately, no matter which tick it
     happens on.
@@ -29,11 +29,8 @@ Reward schedule (see constants.py "REWARD SCHEDULE" section for the full spec):
 """
 
 import torch
-from sim_core.constants import (
-    N_INPUT, OUTPUT_IDX, NOISE_STD, STRAIGHT_THRESH,
-    BIG_REWARD, SMALL_REWARD, CRASH_PENALTY,
-    TURN_REWARD_BIG, TURN_REWARD_SMALL, TICKS_PER_RUN,
-)
+from sim_core import constants
+from sim_core.constants import N_INPUT, OUTPUT_IDX, TICKS_PER_RUN
 from sim_core.ctrnn import activation_step, plasticity_step
 
 
@@ -159,7 +156,7 @@ def simulate_training_phase(state, W, M, A, B, C, D, beta, eta,
 
         # --- CTRNN tick: clamp inputs, advance state, apply plasticity ---
         state[:, :N_INPUT] = input_vec
-        new_state = activation_step(state, W, beta, NOISE_STD, noise_generator)
+        new_state = activation_step(state, W, beta, constants.NOISE_STD, noise_generator)
         dW = plasticity_step(state, W, M, A, B, C, D, eta)
         W = W + dW
         W = W / W.abs().amax(dim=(1, 2), keepdim=True).clamp(min=1e-8)
@@ -167,15 +164,15 @@ def simulate_training_phase(state, W, M, A, B, C, D, beta, eta,
         output = new_state[:, OUTPUT_IDX]
 
         # --- score this tick ---
-        straight_ok = output.abs() < STRAIGHT_THRESH
-        turn_ok = output.abs() >= STRAIGHT_THRESH
+        straight_ok = output.abs() < constants.STRAIGHT_THRESH
+        turn_ok = output.abs() >= constants.STRAIGHT_THRESH
         correct = torch.where(is_turn_tick, turn_ok, straight_ok)
 
         arm_choice = torch.where(
-            output >= STRAIGHT_THRESH,
+            output >= constants.STRAIGHT_THRESH,
             torch.ones_like(chosen_arm),
             torch.where(
-                output <= -STRAIGHT_THRESH,
+                output <= -constants.STRAIGHT_THRESH,
                 torch.zeros_like(chosen_arm),
                 torch.full_like(chosen_arm, -1),
             ),
@@ -191,14 +188,14 @@ def simulate_training_phase(state, W, M, A, B, C, D, beta, eta,
         # (small-reward) arm pays SMALL_REWARD at each payout point.
         chose_big_reward_arm = chosen_arm == big_reward_arm
         arm_reward = torch.where(chose_big_reward_arm,
-                                 torch.full_like(total_reward, BIG_REWARD),
-                                 torch.full_like(total_reward, SMALL_REWARD))
+                                 torch.full_like(total_reward, constants.BIG_REWARD),
+                                 torch.full_like(total_reward, constants.SMALL_REWARD))
         turn_reward = torch.where(chose_big_reward_arm,
-                                  torch.full_like(total_reward, TURN_REWARD_BIG),
-                                  torch.full_like(total_reward, TURN_REWARD_SMALL))
+                                  torch.full_like(total_reward, constants.TURN_REWARD_BIG),
+                                  torch.full_like(total_reward, constants.TURN_REWARD_SMALL))
 
         reward_delta = torch.zeros(pop, device=device)
-        reward_delta = torch.where(crash, torch.full_like(reward_delta, CRASH_PENALTY), reward_delta)
+        reward_delta = torch.where(crash, torch.full_like(reward_delta, constants.CRASH_PENALTY), reward_delta)
         reward_delta = torch.where(turned_correctly, turn_reward, reward_delta)
         reward_delta = torch.where(got_reward, arm_reward, reward_delta)
         total_reward += reward_delta
