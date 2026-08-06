@@ -10,7 +10,7 @@ from pathlib import Path
 
 # ==== 2. CONSTANTS / USER INPUTS ============================================
 OUTPUT_FOLDER = Path("C:/EPANN_replay/configs/batch_to_run")
-FILENAME_PREFIX = "no_context_taskAB_seed"   # files are named f"{FILENAME_PREFIX}{seed}.json"
+FILENAME_PREFIX = "ep_soltoggio_rewards_no_cc_"   # files are named f"{FILENAME_PREFIX}{seed}.json"
 
 MASTER_SEEDS = range(25)   # 0..24
 
@@ -40,10 +40,10 @@ BASE_CONFIG = {
     "tau": 1.0,
     "noise_std": 0.1,
     "straight_thresh": 1 / 3,
-    "big_reward": 0.0,
-    "small_reward": 0.0,
+    "big_reward": 1.0,
+    "small_reward": 0.2,
     "crash_penalty": -0.4,
-    "turn_reward_big": 1.0,
+    "turn_reward_big": 0.0,
     "turn_reward_small": 0.0,
 }
 

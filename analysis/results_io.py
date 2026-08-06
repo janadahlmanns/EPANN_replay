@@ -11,7 +11,7 @@ File layout (see save_results_h5):
     genome/best/                   best individual of the final population + fitness
     history/reward_evolution/      per-generation reward/L1 stats (see fitness.py)
     history/cue_importance/        per-tracked-generation cue-ablation importance
-    history/debug_pgpe/            per-generation PGPE center/stdev diagnostics
+    history/pgpe/                  per-generation PGPE center/stdev diagnostics
     history/tracked/               per-tracked-generation snapshots, stacked along
                                     a leading "tracked generation" axis
 """
@@ -80,7 +80,7 @@ def _write_tracked_records(h5_group, tracked_generations, tracked_records):
 
 
 # ==== 4) TOP-LEVEL WRITE/READ ENTRYPOINTS =======================================
-def save_results_h5(path, config, run_metadata, searcher, history, debug_pgpe_history):
+def save_results_h5(path, config, run_metadata, searcher, history, pgpe_history):
     """Write one run's full numeric results plus its config/metadata to path."""
     with h5py.File(path, "w") as h5_file:
         meta_group = h5_file.create_group("meta")
@@ -92,7 +92,7 @@ def save_results_h5(path, config, run_metadata, searcher, history, debug_pgpe_hi
 
         _write_flat_history(h5_file.create_group("history/reward_evolution"), history["reward_evolution"])
         _write_flat_history(h5_file.create_group("history/cue_importance"), history["cue_importance_history"])
-        _write_flat_history(h5_file.create_group("history/debug_pgpe"), debug_pgpe_history)
+        _write_flat_history(h5_file.create_group("history/pgpe"), pgpe_history)
         _write_tracked_records(
             h5_file.create_group("history/tracked"),
             history["tracked_generations"],

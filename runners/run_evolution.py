@@ -57,9 +57,9 @@ with open(CONFIG_PATH, "r", encoding="utf-8") as _config_file:
     CONFIG = json.load(_config_file)
 
 RUN_NAME = CONFIG_PATH.stem  # output folder is always named after the input config file
-RUN_TIMESTAMP = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")  # microsecond precision
-                                                                       # so re-running the same
-                                                                       # config can never collide
+RUN_TIMESTAMP = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")  # year->...->second, so
+                                                                     # alphabetical (file explorer)
+                                                                     # order is chronological order
 RUN_DIR = OUTPUT_ROOT / f"{RUN_NAME}_{RUN_TIMESTAMP}"  # everything this run produces lives here
 DEVICE = CONFIG["device"]
 N_NEURONS = CONFIG["n_neurons"]  # total neurons; see constants.configure_network() for the fixed
@@ -134,8 +134,8 @@ SENSORY_CUE_FILENAME = "sensory_cues.png"
 TRAINING_REWARD_FILENAME = "training_reward_evolution.png"
 L1_EVOLUTION_FILENAME = "l1_evolution.png"
 INPUT_WEIGHING_FILENAME = "input_weighing.png"
-DEBUG_PGPE_PARAMS_FILENAME = "debug_pgpe_params.png"
-DEBUG_PGPE_FITNESS_FILENAME = "debug_pgpe_fitness.png"
+PGPE_PARAMS_FILENAME = "pgpe_params.png"
+PGPE_FITNESS_FILENAME = "pgpe_fitness.png"
 REWARD_EVOLUTION_COLORS = ["#E07A5F", "#3D405B", "#81B29A"]
 PALETTE_COLORS = ["#E07A5F", "#3D405B", "#81B29A", "#F2CC8F", "#F4F1DE"]
 WEIGHT_HIST_BINS = 80
@@ -144,18 +144,18 @@ WEIGHT_HIST_BINS = 80
 # lives in analysis/decision_plotting.py now, shared with run_batch.py's facet plots.
 
 
-# ==== DEBUG: PGPE DIAGNOSTIC TRACKING (REMOVE AFTER TROUBLESHOOTING) ==========
-_DEBUG_SENSORY_CUE_NEURON_INDICES = (INPUT_SENSORY_A, INPUT_SENSORY_B)
+# ==== 3) PGPE DIAGNOSTIC TRACKING ==============================================
+_SENSORY_CUE_NEURON_INDICES = (INPUT_SENSORY_A, INPUT_SENSORY_B)
 
 
-def _debug_sensory_cue_genome_indices():
+def _sensory_cue_genome_indices():
     """Flat-genome indices touching sensory-cue neurons in any N-sized axis."""
     indices = []
     offset = 0
     for _, shape in GENOME_SPEC:
         for local_idx in np.ndindex(shape):
             if any(
-                (axis_size > max(_DEBUG_SENSORY_CUE_NEURON_INDICES)) and (axis_value in _DEBUG_SENSORY_CUE_NEURON_INDICES)
+                (axis_size > max(_SENSORY_CUE_NEURON_INDICES)) and (axis_value in _SENSORY_CUE_NEURON_INDICES)
                 for axis_size, axis_value in zip(shape, local_idx)
             ):
                 indices.append(offset + int(np.ravel_multi_index(local_idx, shape)))
@@ -163,10 +163,10 @@ def _debug_sensory_cue_genome_indices():
     return torch.tensor(indices, dtype=torch.long)
 
 
-DEBUG_SENSORY_CUE_GENOME_INDICES = _debug_sensory_cue_genome_indices()
+SENSORY_CUE_GENOME_INDICES = _sensory_cue_genome_indices()
 
 
-def _init_debug_pgpe_history():
+def _init_pgpe_history():
     return {
         "generation": [],
         "center_norm": [],
@@ -182,7 +182,7 @@ def _init_debug_pgpe_history():
     }
 
 
-def _debug_collect_pgpe_history(searcher, reward_evolution, debug_history):
+def _collect_pgpe_history(searcher, reward_evolution, pgpe_history):
     status = searcher.status
 
     generation = int(reward_evolution["generation"][-1])
@@ -194,41 +194,41 @@ def _debug_collect_pgpe_history(searcher, reward_evolution, debug_history):
         stdev = getattr(searcher, "stdev", None)
     if center is None or stdev is None:
         raise RuntimeError(
-            "DEBUG tracking could not find PGPE center/stdev in searcher.status or as searcher attributes."
+            "PGPE tracking could not find PGPE center/stdev in searcher.status or as searcher attributes."
         )
 
     center = center.detach().reshape(-1).float().cpu()
     stdev = stdev.detach().reshape(-1).float().cpu()
-    if DEBUG_SENSORY_CUE_GENOME_INDICES.numel() == 0:
-        raise RuntimeError("DEBUG sensory-cue index set is empty.")
-    sensory_stdev = stdev[DEBUG_SENSORY_CUE_GENOME_INDICES]
+    if SENSORY_CUE_GENOME_INDICES.numel() == 0:
+        raise RuntimeError("Sensory-cue index set is empty.")
+    sensory_stdev = stdev[SENSORY_CUE_GENOME_INDICES]
 
-    debug_history["generation"].append(generation)
-    debug_history["center_norm"].append(float(torch.linalg.vector_norm(center).item()))
-    debug_history["stdev_mean"].append(float(stdev.mean().item()))
-    debug_history["stdev_min"].append(float(stdev.min().item()))
-    debug_history["stdev_max"].append(float(stdev.max().item()))
-    debug_history["stdev_sensory_mean"].append(float(sensory_stdev.mean().item()))
-    debug_history["stdev_sensory_min"].append(float(sensory_stdev.min().item()))
-    debug_history["stdev_sensory_max"].append(float(sensory_stdev.max().item()))
-    debug_history["fitness_mean"].append(float(reward_evolution["mean_eval"][-1]))
-    debug_history["fitness_max"].append(float(reward_evolution["pop_best_eval"][-1]))
-    debug_history["fitness_std"].append(float(reward_evolution["std_eval"][-1]))
+    pgpe_history["generation"].append(generation)
+    pgpe_history["center_norm"].append(float(torch.linalg.vector_norm(center).item()))
+    pgpe_history["stdev_mean"].append(float(stdev.mean().item()))
+    pgpe_history["stdev_min"].append(float(stdev.min().item()))
+    pgpe_history["stdev_max"].append(float(stdev.max().item()))
+    pgpe_history["stdev_sensory_mean"].append(float(sensory_stdev.mean().item()))
+    pgpe_history["stdev_sensory_min"].append(float(sensory_stdev.min().item()))
+    pgpe_history["stdev_sensory_max"].append(float(sensory_stdev.max().item()))
+    pgpe_history["fitness_mean"].append(float(reward_evolution["mean_eval"][-1]))
+    pgpe_history["fitness_max"].append(float(reward_evolution["pop_best_eval"][-1]))
+    pgpe_history["fitness_std"].append(float(reward_evolution["std_eval"][-1]))
 
 
-def _save_debug_pgpe_params_plot(plot_dir, debug_pgpe_history):
-    generations = np.array(debug_pgpe_history["generation"])
-    center_norm = np.array(debug_pgpe_history["center_norm"])
-    stdev_mean = np.array(debug_pgpe_history["stdev_mean"])
-    stdev_min = np.array(debug_pgpe_history["stdev_min"])
-    stdev_max = np.array(debug_pgpe_history["stdev_max"])
-    stdev_sensory_mean = np.array(debug_pgpe_history["stdev_sensory_mean"])
-    stdev_sensory_min = np.array(debug_pgpe_history["stdev_sensory_min"])
-    stdev_sensory_max = np.array(debug_pgpe_history["stdev_sensory_max"])
+def _save_pgpe_params_plot(plot_dir, pgpe_history):
+    generations = np.array(pgpe_history["generation"])
+    center_norm = np.array(pgpe_history["center_norm"])
+    stdev_mean = np.array(pgpe_history["stdev_mean"])
+    stdev_min = np.array(pgpe_history["stdev_min"])
+    stdev_max = np.array(pgpe_history["stdev_max"])
+    stdev_sensory_mean = np.array(pgpe_history["stdev_sensory_mean"])
+    stdev_sensory_min = np.array(pgpe_history["stdev_sensory_min"])
+    stdev_sensory_max = np.array(pgpe_history["stdev_sensory_max"])
 
     figure, axes = plt.subplots(nrows=1, ncols=3, figsize=(18, 5), dpi=PLOT_DPI)
     axes[0].plot(generations, center_norm, color="#3D405B", linewidth=2.0)
-    axes[0].set_title("DEBUG: PGPE center norm")
+    axes[0].set_title("PGPE center norm")
     axes[0].set_xlabel("Generation")
     axes[0].set_ylabel("L2 norm")
     axes[0].grid(True, alpha=0.2)
@@ -236,7 +236,7 @@ def _save_debug_pgpe_params_plot(plot_dir, debug_pgpe_history):
     axes[1].plot(generations, stdev_mean, color="#81B29A", linewidth=2.0, label="mean")
     axes[1].plot(generations, stdev_min, color="#E07A5F", linewidth=1.5, label="min")
     axes[1].plot(generations, stdev_max, color="#3D405B", linewidth=1.5, label="max")
-    axes[1].set_title("DEBUG: PGPE stdev (all dims)")
+    axes[1].set_title("PGPE stdev (all dims)")
     axes[1].set_xlabel("Generation")
     axes[1].set_ylabel("stdev")
     axes[1].grid(True, alpha=0.2)
@@ -245,44 +245,44 @@ def _save_debug_pgpe_params_plot(plot_dir, debug_pgpe_history):
     axes[2].plot(generations, stdev_sensory_mean, color="#81B29A", linewidth=2.0, label="mean")
     axes[2].plot(generations, stdev_sensory_min, color="#E07A5F", linewidth=1.5, label="min")
     axes[2].plot(generations, stdev_sensory_max, color="#3D405B", linewidth=1.5, label="max")
-    axes[2].set_title("DEBUG: PGPE stdev (sensory-cue dims)")
+    axes[2].set_title("PGPE stdev (sensory-cue dims)")
     axes[2].set_xlabel("Generation")
     axes[2].set_ylabel("stdev")
     axes[2].grid(True, alpha=0.2)
     axes[2].legend()
 
     figure.tight_layout()
-    figure.savefig(_prefixed_path(plot_dir, DEBUG_PGPE_PARAMS_FILENAME))
+    figure.savefig(_prefixed_path(plot_dir, PGPE_PARAMS_FILENAME))
     plt.close(figure)
 
 
-def _save_debug_pgpe_fitness_plot(plot_dir, debug_pgpe_history):
-    generations = np.array(debug_pgpe_history["generation"])
-    fitness_mean = np.array(debug_pgpe_history["fitness_mean"])
-    fitness_max = np.array(debug_pgpe_history["fitness_max"])
-    fitness_std = np.array(debug_pgpe_history["fitness_std"])
+def _save_pgpe_fitness_plot(plot_dir, pgpe_history):
+    generations = np.array(pgpe_history["generation"])
+    fitness_mean = np.array(pgpe_history["fitness_mean"])
+    fitness_max = np.array(pgpe_history["fitness_max"])
+    fitness_std = np.array(pgpe_history["fitness_std"])
 
     figure, axes = plt.subplots(nrows=1, ncols=2, figsize=(12, 5), dpi=PLOT_DPI)
     axes[0].plot(generations, fitness_mean, color="#81B29A", linewidth=2.0, label="mean")
     axes[0].plot(generations, fitness_max, color="#3D405B", linewidth=2.0, label="max")
-    axes[0].set_title("DEBUG: sampled population fitness")
+    axes[0].set_title("Sampled population fitness")
     axes[0].set_xlabel("Generation")
     axes[0].set_ylabel("Fitness")
     axes[0].grid(True, alpha=0.2)
     axes[0].legend()
 
     axes[1].plot(generations, fitness_std, color="#E07A5F", linewidth=2.0)
-    axes[1].set_title("DEBUG: sampled population fitness std")
+    axes[1].set_title("Sampled population fitness std")
     axes[1].set_xlabel("Generation")
     axes[1].set_ylabel("Fitness std")
     axes[1].grid(True, alpha=0.2)
 
     figure.tight_layout()
-    figure.savefig(_prefixed_path(plot_dir, DEBUG_PGPE_FITNESS_FILENAME))
+    figure.savefig(_prefixed_path(plot_dir, PGPE_FITNESS_FILENAME))
     plt.close(figure)
 
 
-# ==== 3) PLOTTING HELPERS ======================================================
+# ==== 4) PLOTTING HELPERS ======================================================
 def _prefixed_path(plot_dir, filename):
     """Prefix every saved figure's filename with RUN_NAME, e.g. 'decisions.png' -> 'NAME_decisions.png'."""
     return plot_dir / f"{RUN_NAME}_{filename}"
@@ -336,8 +336,10 @@ def _save_decisions_plot(plot_dir, tracked_records):
     colorbar = figure.colorbar(im0, cax=colorbar_axis, orientation="horizontal", ticks=np.arange(0, N_DECISION_CATEGORIES, 1))
     colorbar.ax.set_xticklabels(DECISION_LABELS)
     figure.suptitle("Decisions: first vs last tracked generation (sorted by fitness)")
-    figure.tight_layout(rect=[0.0, 0.04, 1.0, 0.95])
-    figure.savefig(_prefixed_path(plot_dir, DECISIONS_FILENAME))
+    # bbox_inches="tight" at save time instead of figure.tight_layout(): tight_layout()
+    # doesn't support the colorbar's gridspec-placed Axes and warns every run (same
+    # approach _save_all_decisions_plot below already uses for the same reason)
+    figure.savefig(_prefixed_path(plot_dir, DECISIONS_FILENAME), bbox_inches="tight")
     plt.close(figure)
 
 
@@ -677,7 +679,7 @@ def _save_sensory_cue_plot(plot_dir, tracked_records):
     plt.close(figure)
 
 
-def _save_all_plots_and_results(searcher, history, debug_pgpe_history):
+def _save_all_plots_and_results(searcher, history, pgpe_history):
     """Create RUN_DIR, copy the config file used for this run into it, save all
     tracking plots, and write the full numeric results (final genomes + history)
     to RESULTS_FILENAME -- all into the one timestamped, collision-proof folder."""
@@ -701,8 +703,8 @@ def _save_all_plots_and_results(searcher, history, debug_pgpe_history):
     _save_l1_evolution_plot(RUN_DIR, reward_evolution)
     _save_input_weighing_plot(RUN_DIR, cue_importance_history)
     _save_sensory_cue_plot(RUN_DIR, tracked_records)
-    _save_debug_pgpe_params_plot(RUN_DIR, debug_pgpe_history)
-    _save_debug_pgpe_fitness_plot(RUN_DIR, debug_pgpe_history)
+    _save_pgpe_params_plot(RUN_DIR, pgpe_history)
+    _save_pgpe_fitness_plot(RUN_DIR, pgpe_history)
 
     run_metadata = {
         "run_name": RUN_NAME,
@@ -711,12 +713,12 @@ def _save_all_plots_and_results(searcher, history, debug_pgpe_history):
         "torch_version": torch.__version__,
         "evotorch_version": evotorch.__version__,
     }
-    save_results_h5(RUN_DIR / results_filename(RUN_NAME), CONFIG, run_metadata, searcher, history, debug_pgpe_history)
+    save_results_h5(RUN_DIR / results_filename(RUN_NAME), CONFIG, run_metadata, searcher, history, pgpe_history)
 
     print(f"\nSaved plots + results to: {RUN_DIR}")
 
 
-# ==== 4) EVOLUTION RUN ==========================================================
+# ==== 5) EVOLUTION RUN ==========================================================
 torch.manual_seed(MASTER_SEED)
 torch.cuda.manual_seed_all(MASTER_SEED)
 torch.use_deterministic_algorithms(True)
@@ -774,15 +776,14 @@ searcher = PGPE(
 )
 
 StdOutLogger(searcher)
-debug_pgpe_history = _init_debug_pgpe_history()
+pgpe_history = _init_pgpe_history()
 for _ in range(NUM_GENERATIONS):
     searcher.step()
     history_snapshot = get_printing_history()
-    _debug_collect_pgpe_history(searcher, history_snapshot["reward_evolution"], debug_pgpe_history)
+    _collect_pgpe_history(searcher, history_snapshot["reward_evolution"], pgpe_history)
 
 history = get_printing_history()
-_save_all_plots_and_results(searcher, history, debug_pgpe_history)
+_save_all_plots_and_results(searcher, history, pgpe_history)
 
 print("\nFinal searcher status:")
 print(searcher.status)
-print(f"\nDEBUG: sensory-cue genome dimensions tracked: {int(DEBUG_SENSORY_CUE_GENOME_INDICES.numel())}/{GENOME_LENGTH}")
