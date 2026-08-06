@@ -1,4 +1,4 @@
-"""Run PGPE with tracking output and save end-of-run plots."""
+"""Run PGPE with tracking output and save end-of-run plots + full numeric results."""
 
 # ==== 1) RNG DETERMINISM + PATH SETUP ==========================================
 import os
@@ -9,37 +9,59 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import datetime
 import functools
 import json
-import math
 import shutil
 from pathlib import Path
 
+import evotorch
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from evotorch import Problem
 from evotorch.algorithms import PGPE
 from evotorch.logging import StdOutLogger
-from matplotlib.colors import ListedColormap
 
+from analysis.decision_plotting import (
+    DECISION_CMAP,
+    DECISION_COLORS,
+    DECISION_LABELS,
+    N_DECISION_CATEGORIES,
+    decision_category_matrix,
+    draw_decisions_panel,
+    grid_dims,
+    sort_by_fitness,
+)
+from analysis.results_io import results_filename, save_results_h5
 from sim_core import constants
 from sim_core.constants import INPUT_SENSORY_A, INPUT_SENSORY_B
 from sim_core.fitness import configure_printing, fitness_function, get_printing_history
 from sim_core.genome_codec import GENOME_LENGTH, GENOME_SPEC
 from sim_core.paradigm import PHASE_REPLAY, parse_paradigm
 
-# ==== 2) CONFIG LOADING =========================================================
-# Every experiment parameter lives in a JSON config file (see batches_to_run/ for
-# examples), passed as the sole CLI argument. No defaults/fallbacks here -- a
-# missing or malformed config field fails loudly (KeyError), on purpose.
-if len(sys.argv) != 2:
-    raise ValueError("Usage: python run_evolution.py <path/to/config.json>")
-CONFIG_PATH = Path(sys.argv[1])
+# ==== 2) CONFIG LOADING + OUTPUT LOCATION =======================================
+# Results always live under the hardcoded DATA_ROOT -- not a user choice. The
+# config is found by joining CONFIGS_ROOT with the given name + ".json" -- that's
+# it, nothing else: for a plain name that's configs/<name>.json; run_batch.py
+# reaches configs/batch_to_run/<name>.json the same way, by passing
+# "batch_to_run/<name>" as that same argument. No defaults/fallbacks on the
+# config contents -- a missing or malformed field fails loudly (KeyError), on purpose.
+CONFIGS_ROOT = Path("C:/EPANN_replay/configs")
+DATA_ROOT = Path("C:/EPANN_replay/data")
+
+if len(sys.argv) != 3:
+    raise ValueError("Usage: python run_evolution.py <config_name> <experiment_name>")
+CONFIG_PATH = CONFIGS_ROOT / f"{sys.argv[1]}.json"
+OUTPUT_ROOT = DATA_ROOT / sys.argv[2]
 with open(CONFIG_PATH, "r", encoding="utf-8") as _config_file:
     CONFIG = json.load(_config_file)
 
-RUN_NAME = CONFIG_PATH.stem  # output folder always matches the input config file's name
+RUN_NAME = CONFIG_PATH.stem  # output folder is always named after the input config file
+RUN_TIMESTAMP = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")  # microsecond precision
+                                                                       # so re-running the same
+                                                                       # config can never collide
+RUN_DIR = OUTPUT_ROOT / f"{RUN_NAME}_{RUN_TIMESTAMP}"  # everything this run produces lives here
 DEVICE = CONFIG["device"]
 MASTER_SEED = CONFIG["master_seed"]
 NOISE_SEED = CONFIG["noise_seed"]
@@ -47,9 +69,12 @@ REWARD_SEED = CONFIG["reward_seed"]
 TEST_SEED = CONFIG["test_seed"]  # dedicated RNG stream for cue-importance measurement only -- never
                                   # touches noise_generator/reward_generator, so the tracking interval
                                   # can't change the run
+WEIGHT_INIT_SEED = CONFIG["weight_init_seed"]  # dedicated RNG stream for the fresh per-lifetime initial-weight
+                                                # draw (sample_initial_weights) -- never touches any other stream
 
 EVO_CONTEXT_CUES_ON = CONFIG["evo_context_cues_on"]  # if False, context-cue input neurons are clipped to zero during evolution
 EVO_SENSORY_CUES_ON = CONFIG["evo_sensory_cues_on"]  # if False, sensory-cue input neurons are clipped to zero during evolution
+EVO_PLASTICITY_ON = CONFIG["evo_plasticity_on"]  # if False, eta is forced to all zeros regardless of genome -> no plasticity, frozen weights
 
 # Per-evaluation phase sequence: comma-separated (phase, value) pairs, where phase
 # is one of "trainA"/"trainB" (value = number of maze runs) or "replay" (value =
@@ -91,7 +116,6 @@ constants.configure(
     turn_reward_small=CONFIG["turn_reward_small"],
 )
 
-PLOTS_ROOT = Path("C:/EPANN_replay/data/plots")
 DECISIONS_FILENAME = "decisions.png"
 ALL_DECISIONS_FILENAME = "all_decisions.png"
 EVENT_COUNTS_FILENAME = "event_counts.png"
@@ -109,34 +133,8 @@ REWARD_EVOLUTION_COLORS = ["#E07A5F", "#3D405B", "#81B29A"]
 PALETTE_COLORS = ["#E07A5F", "#3D405B", "#81B29A", "#F2CC8F", "#F4F1DE"]
 WEIGHT_HIST_BINS = 80
 
-# Decision-outcome categories, encoded 0..9 in _decision_category_matrix.
-# Color design: lightness encodes crash (light) vs. maze-end reward (dark);
-# hue encodes turn direction (red=left, blue=right; gray/neutral = no turn);
-# saturation encodes whether the chosen arm was correct (high) or not (low).
-#   .  = no event                              -> white
-#   x  = crash before/at the turn (no turn)     -> super light, near-white gray
-#   Lx = correct left turn, then crash          -> light, highly saturated red
-#   Rx = correct right turn, then crash         -> light, highly saturated blue
-#   lx = wrong left turn, then crash            -> light, low saturation red
-#   rx = wrong right turn, then crash           -> light, low saturation blue
-#   L  = correct left turn, big reward at end   -> dark, highly saturated red
-#   R  = correct right turn, big reward at end  -> dark, highly saturated blue
-#   l  = wrong left turn, small reward at end   -> dark, low saturation red
-#   r  = wrong right turn, small reward at end  -> dark, low saturation blue
-DECISION_COLORS = [
-    "#ffffff",  # .
-    "#f0f0f0",  # x
-    "#f49a9a",  # Lx
-    "#9abff4",  # Rx
-    "#dfc3c3",  # lx
-    "#c3cfdf",  # rx
-    "#9c1111",  # L
-    "#114b9c",  # R
-    "#7e4444",  # l
-    "#445c7e",  # r
-]
-DECISION_LABELS = [".", "x", "Lx", "Rx", "lx", "rx", "L", "R", "l", "r"]
-N_DECISION_CATEGORIES = len(DECISION_LABELS)
+# Decision-outcome color/label scheme (DECISION_COLORS/LABELS/N_DECISION_CATEGORIES)
+# lives in analysis/decision_plotting.py now, shared with run_batch.py's facet plots.
 
 
 # ==== DEBUG: PGPE DIAGNOSTIC TRACKING (REMOVE AFTER TROUBLESHOOTING) ==========
@@ -293,9 +291,9 @@ def _generation_colors(tracked_generations):
     return colors
 
 
-def _sort_record_by_fitness(record):
+def _record_sorted_by_fitness(record):
     """Return a copy of record with all per-network arrays sorted best-to-worst by fitness."""
-    order = np.argsort(record["fitness"].numpy())[::-1].copy()
+    (order,) = sort_by_fitness(record["fitness"].numpy())
     sorted_record = dict(record)
     for key in ("decisions_by_run", "crashed_by_run", "rewarded_by_run",
                 "big_reward_by_run", "sensory_cue_by_run", "correct_arm_by_run"):
@@ -303,55 +301,30 @@ def _sort_record_by_fitness(record):
     return sorted_record
 
 
-def _decision_category_matrix(record):
-    """Encode each run's outcome into one of the 10 categories (see DECISION_LABELS):
-    0=. 1=x 2=Lx 3=Rx 4=lx 5=rx 6=L 7=R 8=l 9=r
-    """
-    decisions = record["decisions_by_run"].numpy()
-    crashed = record["crashed_by_run"].numpy()
-    rewarded = record["rewarded_by_run"].numpy()
-    correct_arm = record["correct_arm_by_run"].numpy()
-
-    left = decisions == 0
-    right = decisions == 1
-    turned = decisions != -1
-
-    categories = np.zeros(decisions.shape, dtype=np.int32)
-    categories[crashed & ~turned] = 1                                  # x
-    categories[crashed & left & correct_arm] = 2                       # Lx
-    categories[crashed & right & correct_arm] = 3                      # Rx
-    categories[crashed & left & ~correct_arm] = 4                      # lx
-    categories[crashed & right & ~correct_arm] = 5                     # rx
-    categories[rewarded & left & correct_arm] = 6                      # L
-    categories[rewarded & right & correct_arm] = 7                     # R
-    categories[rewarded & left & ~correct_arm] = 8                     # l
-    categories[rewarded & right & ~correct_arm] = 9                    # r
-    return categories
-
-
-def _draw_decisions_panel(axis, matrix, title, cmap):
-    """Render a single fitness-sorted decision heatmap panel."""
-    im = axis.imshow(matrix, cmap=cmap, interpolation="nearest", vmin=0, vmax=N_DECISION_CATEGORIES - 1, aspect="auto")
-    axis.set_title(title)
-    axis.set_xlabel("Run index")
-    axis.set_ylabel("Network (best→worst)")
-    return im
+def _record_decision_matrix(record):
+    """Encode record's per-run outcomes into category ids via the shared encoder
+    (see analysis/decision_plotting.py's DECISION_LABELS)."""
+    return decision_category_matrix(
+        record["decisions_by_run"].numpy(),
+        record["crashed_by_run"].numpy(),
+        record["rewarded_by_run"].numpy(),
+        record["correct_arm_by_run"].numpy(),
+    )
 
 
 def _save_decisions_plot(plot_dir, tracked_records):
     """Save side-by-side heatmaps for first and last tracked generations, sorted by fitness."""
-    first_matrix = _decision_category_matrix(_sort_record_by_fitness(tracked_records[0]))
-    last_matrix = _decision_category_matrix(_sort_record_by_fitness(tracked_records[-1]))
+    first_matrix = _record_decision_matrix(_record_sorted_by_fitness(tracked_records[0]))
+    last_matrix = _record_decision_matrix(_record_sorted_by_fitness(tracked_records[-1]))
 
-    cmap = ListedColormap(DECISION_COLORS)
     figure = plt.figure(figsize=(18, 9), dpi=PLOT_DPI)
     grid = figure.add_gridspec(nrows=2, ncols=2, height_ratios=[20, 1], hspace=0.28, wspace=0.12)
     ax0 = figure.add_subplot(grid[0, 0])
     ax1 = figure.add_subplot(grid[0, 1])
     colorbar_axis = figure.add_subplot(grid[1, :])
 
-    im0 = _draw_decisions_panel(ax0, first_matrix, f"Generation {tracked_records[0]['generation']}", cmap)
-    _draw_decisions_panel(ax1, last_matrix, f"Generation {tracked_records[-1]['generation']}", cmap)
+    im0 = draw_decisions_panel(ax0, first_matrix, f"Generation {tracked_records[0]['generation']}")
+    draw_decisions_panel(ax1, last_matrix, f"Generation {tracked_records[-1]['generation']}")
 
     colorbar = figure.colorbar(im0, cax=colorbar_axis, orientation="horizontal", ticks=np.arange(0, N_DECISION_CATEGORIES, 1))
     colorbar.ax.set_xticklabels(DECISION_LABELS)
@@ -364,10 +337,7 @@ def _save_decisions_plot(plot_dir, tracked_records):
 def _save_all_decisions_plot(plot_dir, tracked_records, tracked_generations):
     """Save a grid of decision heatmaps for every tracked generation, sorted by fitness."""
     n_plots = len(tracked_records)
-    n_cols = math.ceil(math.sqrt(n_plots))
-    n_rows = math.ceil(n_plots / n_cols)
-
-    cmap = ListedColormap(DECISION_COLORS)
+    n_rows, n_cols = grid_dims(n_plots)
 
     # Fixed panel size in inches so labels always look the same regardless of grid size.
     panel_w = 8.0
@@ -391,9 +361,9 @@ def _save_all_decisions_plot(plot_dir, tracked_records, tracked_generations):
     im_ref = None
     for idx, record in enumerate(tracked_records):
         row, col = divmod(idx, n_cols)
-        matrix = _decision_category_matrix(_sort_record_by_fitness(record))
+        matrix = _record_decision_matrix(_record_sorted_by_fitness(record))
         ax = figure.add_subplot(grid[row, col])
-        im = ax.imshow(matrix, cmap=cmap, interpolation="nearest", vmin=0, vmax=N_DECISION_CATEGORIES - 1, aspect="auto")
+        im = ax.imshow(matrix, cmap=DECISION_CMAP, interpolation="nearest", vmin=0, vmax=N_DECISION_CATEGORIES - 1, aspect="auto")
         ax.set_title(f"Generation {tracked_generations[idx]}", fontsize=fs_title)
         ax.set_xlabel("Run index", fontsize=fs_axis)
         ax.set_ylabel("Network (best→worst)", fontsize=fs_axis)
@@ -446,7 +416,7 @@ def _save_event_counts_plot(plot_dir, tracked_records, tracked_generations, colo
         axis = axes[row_idx, 0]
         counts = np.zeros((n_gens, n_events), dtype=int)
         for g_idx, record in enumerate(tracked_records):
-            matrix = _decision_category_matrix(record)[:, seg_start:seg_end]  # counts don't depend on fitness sort order
+            matrix = _record_decision_matrix(record)[:, seg_start:seg_end]  # counts don't depend on fitness sort order
             for e_idx in range(n_events):
                 counts[g_idx, e_idx] = int((matrix == e_idx + 1).sum())
 
@@ -700,12 +670,12 @@ def _save_sensory_cue_plot(plot_dir, tracked_records):
     plt.close(figure)
 
 
-def _save_all_plots(run_name, history, debug_pgpe_history):
-    """Create output folder, copy the config file used for this run into it for
-    reproducibility, and save all tracking plots."""
-    plot_dir = PLOTS_ROOT / run_name
-    plot_dir.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(CONFIG_PATH, plot_dir / CONFIG_PATH.name)
+def _save_all_plots_and_results(searcher, history, debug_pgpe_history):
+    """Create RUN_DIR, copy the config file used for this run into it, save all
+    tracking plots, and write the full numeric results (final genomes + history)
+    to RESULTS_FILENAME -- all into the one timestamped, collision-proof folder."""
+    RUN_DIR.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(CONFIG_PATH, RUN_DIR / CONFIG_PATH.name)
 
     tracked_generations = history["tracked_generations"]
     tracked_records = history["tracked_records"]
@@ -713,20 +683,30 @@ def _save_all_plots(run_name, history, debug_pgpe_history):
     cue_importance_history = history["cue_importance_history"]
     colors = _generation_colors(tracked_generations)
 
-    _save_decisions_plot(plot_dir, tracked_records)
-    _save_all_decisions_plot(plot_dir, tracked_records, tracked_generations)
-    _save_event_counts_plot(plot_dir, tracked_records, tracked_generations, colors)
-    _save_reward_hist_plot(plot_dir, tracked_records, tracked_generations, colors)
-    _save_frobenius_plot(plot_dir, tracked_records, tracked_generations, colors)
-    _save_weight_distribution_plot(plot_dir, tracked_records, tracked_generations, colors)
-    _save_reward_evolution_plot(plot_dir, reward_evolution)
-    _save_training_reward_evolution_plot(plot_dir, reward_evolution)
-    _save_l1_evolution_plot(plot_dir, reward_evolution)
-    _save_input_weighing_plot(plot_dir, cue_importance_history)
-    _save_sensory_cue_plot(plot_dir, tracked_records)
-    _save_debug_pgpe_params_plot(plot_dir, debug_pgpe_history)
-    _save_debug_pgpe_fitness_plot(plot_dir, debug_pgpe_history)
-    print(f"\nSaved plots to: {plot_dir}")
+    _save_decisions_plot(RUN_DIR, tracked_records)
+    _save_all_decisions_plot(RUN_DIR, tracked_records, tracked_generations)
+    _save_event_counts_plot(RUN_DIR, tracked_records, tracked_generations, colors)
+    _save_reward_hist_plot(RUN_DIR, tracked_records, tracked_generations, colors)
+    _save_frobenius_plot(RUN_DIR, tracked_records, tracked_generations, colors)
+    _save_weight_distribution_plot(RUN_DIR, tracked_records, tracked_generations, colors)
+    _save_reward_evolution_plot(RUN_DIR, reward_evolution)
+    _save_training_reward_evolution_plot(RUN_DIR, reward_evolution)
+    _save_l1_evolution_plot(RUN_DIR, reward_evolution)
+    _save_input_weighing_plot(RUN_DIR, cue_importance_history)
+    _save_sensory_cue_plot(RUN_DIR, tracked_records)
+    _save_debug_pgpe_params_plot(RUN_DIR, debug_pgpe_history)
+    _save_debug_pgpe_fitness_plot(RUN_DIR, debug_pgpe_history)
+
+    run_metadata = {
+        "run_name": RUN_NAME,
+        "timestamp": RUN_TIMESTAMP,
+        "config_filename": CONFIG_PATH.name,
+        "torch_version": torch.__version__,
+        "evotorch_version": evotorch.__version__,
+    }
+    save_results_h5(RUN_DIR / results_filename(RUN_NAME), CONFIG, run_metadata, searcher, history, debug_pgpe_history)
+
+    print(f"\nSaved plots + results to: {RUN_DIR}")
 
 
 # ==== 4) EVOLUTION RUN ==========================================================
@@ -740,6 +720,8 @@ reward_generator = torch.Generator(device=DEVICE)
 reward_generator.manual_seed(REWARD_SEED)
 test_generator = torch.Generator(device=DEVICE)
 test_generator.manual_seed(TEST_SEED)
+weight_init_generator = torch.Generator(device=DEVICE)
+weight_init_generator.manual_seed(WEIGHT_INIT_SEED)
 
 center_init = torch.zeros(GENOME_LENGTH, device=DEVICE)
 
@@ -749,9 +731,11 @@ objective = functools.partial(
     noise_generator=noise_generator,
     reward_generator=reward_generator,
     test_generator=test_generator,
+    weight_init_generator=weight_init_generator,
     l1_lambda=L1_LAMBDA,
     context_cues_on=EVO_CONTEXT_CUES_ON,
     sensory_cues_on=EVO_SENSORY_CUES_ON,
+    evo_plasticity_on=EVO_PLASTICITY_ON,
     paradigm_phases=PARADIGM_PHASES,
 )
 
@@ -790,7 +774,7 @@ for _ in range(NUM_GENERATIONS):
     _debug_collect_pgpe_history(searcher, history_snapshot["reward_evolution"], debug_pgpe_history)
 
 history = get_printing_history()
-_save_all_plots(RUN_NAME, history, debug_pgpe_history)
+_save_all_plots_and_results(searcher, history, debug_pgpe_history)
 
 print("\nFinal searcher status:")
 print(searcher.status)

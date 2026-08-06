@@ -9,7 +9,7 @@ import json
 from pathlib import Path
 
 # ==== 2. CONSTANTS / USER INPUTS ============================================
-OUTPUT_FOLDER = Path("C:/EPANN_replay/runners/batches_to_run")
+OUTPUT_FOLDER = Path("C:/EPANN_replay/configs/batch_to_run")
 FILENAME_PREFIX = "no_context_taskAB_seed"   # files are named f"{FILENAME_PREFIX}{seed}.json"
 
 MASTER_SEEDS = range(25)   # 0..24
@@ -20,8 +20,10 @@ BASE_CONFIG = {
     "noise_seed": 1,
     "reward_seed": 2,
     "test_seed": 3,
+    "weight_init_seed": 4,
     "evo_context_cues_on": True,
     "evo_sensory_cues_on": True,
+    "evo_plasticity_on": True,
     "paradigm": "trainA, 50, replay, 10, trainB, 50",
     "num_generations": 500,
     "search_popsize": 150,

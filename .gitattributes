@@ -1,0 +1,4 @@
+# Normalize text files to LF in the repo, regardless of core.autocrlf, so Git never
+# proposes rewriting line endings on files that are already consistent (LF, matching
+# every editor/tool used on this project).
+* text=auto eol=lf

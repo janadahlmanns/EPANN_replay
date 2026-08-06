@@ -14,7 +14,8 @@ def activation_step(state, W, beta, noise_std, generator):
 
 
 def plasticity_step(state, W, M, A, B, C, D, eta):
-    """state here is the OLD (pre-update) state -- used as both pre- and post-synaptic activity."""
+    """state here is the OLD (pre-update) state -- used as both pre- and post-synaptic activity.
+    eta is per-synapse ([pop, N, N], same shape as W), not a global scalar."""
     pre = state
     post = state
 
@@ -26,5 +27,5 @@ def plasticity_step(state, W, M, A, B, C, D, eta):
     term_C = torch.einsum("bij,bi->bij", C, post)
     hebbian = term_AB + term_B + term_C + D
 
-    dW = eta.view(-1, 1, 1) * mod_term * hebbian
+    dW = eta * mod_term * hebbian
     return dW

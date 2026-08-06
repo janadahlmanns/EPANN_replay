@@ -4,7 +4,7 @@ import torch
 
 from sim_core.constants import N
 from sim_core.fitness_terms import compute_l1_penalty
-from sim_core.genome_codec import unflatten_genome
+from sim_core.genome_codec import sample_initial_weights, unflatten_genome
 from sim_core.maze_task import simulate_training_phase
 from sim_core.paradigm import PHASE_REPLAY, PHASE_TRAIN_A, PHASE_TRAIN_B
 from sim_core.replay_task import assign_replay_reward, simulate_replay_phase
@@ -417,20 +417,26 @@ def _measure_cue_importance(genome, paradigm_phases, device, test_generator,
 
 
 # ==== 7) FITNESS EVALUATION =====================================================
-def evaluate_generation(genome_flat, device, noise_generator, reward_generator, test_generator, l1_lambda,
-                         context_cues_on, sensory_cues_on, paradigm_phases):
+def evaluate_generation(genome_flat, device, noise_generator, reward_generator, test_generator,
+                         weight_init_generator, l1_lambda, context_cues_on, sensory_cues_on,
+                         evo_plasticity_on, paradigm_phases):
     evaluation_idx = len(_REWARD_EVOLUTION["generation"]) + 1
     should_print = _should_print(evaluation_idx)
 
     genome_flat = genome_flat.clone()
     pop = genome_flat.shape[0]
     genome = unflatten_genome(genome_flat, pop)
+    if not evo_plasticity_on:
+        genome["eta"] = torch.zeros_like(genome["eta"])
 
-    frob_start = torch.linalg.matrix_norm(genome["W"], ord="fro", dim=(1, 2))
+    # fresh initial weights every lifetime -- NOT read from the genome, see genome_codec.py
+    W_init = sample_initial_weights(pop, device, weight_init_generator)
+
+    frob_start = torch.linalg.matrix_norm(W_init, ord="fro", dim=(1, 2))
     state0 = torch.zeros(pop, N, device=device)
     state_final, W_final, training_reward, replay_reward, tracking = _run_paradigm(
         genome, paradigm_phases, device, noise_generator, reward_generator, should_print,
-        context_cues_on, sensory_cues_on, state0, genome["W"],
+        context_cues_on, sensory_cues_on, state0, W_init,
     )
 
     unregularized_reward = training_reward + replay_reward
@@ -460,7 +466,7 @@ def evaluate_generation(genome_flat, device, noise_generator, reward_generator, 
             l1_penalty,
             frob_start.detach().cpu(),
             frob_end.detach().cpu(),
-            genome["W"].detach().cpu(),
+            W_init.detach().cpu(),
             W_final.detach().cpu(),
             tracking,
         )
@@ -485,8 +491,10 @@ def evaluate_generation(genome_flat, device, noise_generator, reward_generator, 
     return regularized_fitness
 
 
-def fitness_function(genome_flat, device, noise_generator, reward_generator, test_generator, l1_lambda,
-                      context_cues_on, sensory_cues_on, paradigm_phases):
+def fitness_function(genome_flat, device, noise_generator, reward_generator, test_generator,
+                      weight_init_generator, l1_lambda, context_cues_on, sensory_cues_on,
+                      evo_plasticity_on, paradigm_phases):
     """Vectorized EvoTorch objective entrypoint."""
-    return evaluate_generation(genome_flat, device, noise_generator, reward_generator, test_generator, l1_lambda,
-                                context_cues_on, sensory_cues_on, paradigm_phases)
+    return evaluate_generation(genome_flat, device, noise_generator, reward_generator, test_generator,
+                                weight_init_generator, l1_lambda, context_cues_on, sensory_cues_on,
+                                evo_plasticity_on, paradigm_phases)

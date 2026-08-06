@@ -2,10 +2,10 @@
 
 # ==== NETWORK LAYOUT =========================================================
 # neuron index mapping: [0..6] = inputs, [7] = output, [8..19] = free hidden units
-N = 20
+N = 15
 N_INPUT = 7
 OUTPUT_IDX = 7
-HIDDEN_START = 8
+HIDDEN_START = 1
 
 # input channel order within the first N_INPUT neurons
 INPUT_HOME = 0
@@ -37,6 +37,12 @@ TICKS_PER_RUN = 7                      # fixed: maze_task.py's turn/end-tick che
                                         # hardcoded to this length (1,2,3=straight 4=turn
                                         # 5,6,7=straight(7=mazeend)), so this is structural,
                                         # not a tunable experiment parameter
+
+# Initial-weight sampling range (fresh draw every lifetime -- see genome_codec.py's
+# sample_initial_weights()). Fixed to match Najarro & Risi (2020)'s w ~ U[-0.1, 0.1];
+# structural to the meta-learning framework, not a per-run experiment parameter.
+WEIGHT_INIT_LOW = -0.1
+WEIGHT_INIT_HIGH = 0.1
 
 
 def configure(dt, tau, noise_std, straight_thresh, big_reward, small_reward,
