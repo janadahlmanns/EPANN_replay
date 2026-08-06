@@ -1,10 +1,10 @@
 {
-  "master_seed": 22,
+  "master_seed": 15,
   "device": "cuda",
   "noise_seed": 1,
   "reward_seed": 2,
   "test_seed": 3,
-  "evo_context_cues_on": true,
+  "evo_context_cues_on": false,
   "evo_sensory_cues_on": true,
   "paradigm": "trainA, 50, replay, 10, trainB, 50",
   "num_generations": 500,

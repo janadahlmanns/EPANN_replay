@@ -32,6 +32,13 @@ config_paths = sorted(BATCH_FOLDER.glob("*.json"))
 if not config_paths:
     raise ValueError(f"No .json config files found in {BATCH_FOLDER}")
 
+# Warm up imports of unsigned/native-extension libs (matplotlib, torch, ...) in a
+# throwaway subprocess *before* spawning the parallel chains. Without this, two chains
+# can both import them for the first time at the same instant, and Windows'
+# application-control/reputation check on the never-before-seen DLLs can flake and
+# block one of the concurrent loads (seen with matplotlib's _image DLL).
+subprocess.run([sys.executable, "-c", "import matplotlib.pyplot, torch"], check=True)
+
 # split into RUN_IN_PARALLEL contiguous chunks, one chain per chunk
 chains = [config_paths[chain_idx::RUN_IN_PARALLEL] for chain_idx in range(RUN_IN_PARALLEL)]
 
