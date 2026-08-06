@@ -1,6 +1,7 @@
 .venv/
 data/
 admin/
+.claude/
 
 __pycache__/
 *.py[cod]

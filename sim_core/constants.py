@@ -1,11 +1,16 @@
 """Shared constants for the CTRNN T-maze simulation core. Imported by every sim_core module."""
 
 # ==== NETWORK LAYOUT =========================================================
-# neuron index mapping: [0..6] = inputs, [7] = output, [8..19] = free hidden units
-N = 15
+# neuron index mapping: [0..N_INPUT-1] = inputs, [OUTPUT_IDX] = output,
+# [HIDDEN_START..N-1] = hidden units (however many are left over once N is fixed).
+# N_INPUT/OUTPUT_IDX/HIDDEN_START are structural (always 7/7/8) -- N itself is a
+# per-run experiment parameter, set via configure_network() below (must be called
+# before any code computes tensor shapes from N; see genome_codec.py's docstring).
 N_INPUT = 7
 OUTPUT_IDX = 7
-HIDDEN_START = 1
+HIDDEN_START = 8
+
+N = None
 
 # input channel order within the first N_INPUT neurons
 INPUT_HOME = 0
@@ -15,6 +20,19 @@ INPUT_CONTEXT_A = 3
 INPUT_CONTEXT_B = 4
 INPUT_SENSORY_A = 5
 INPUT_SENSORY_B = 6
+
+
+def configure_network(n_neurons):
+    """Set the total neuron count N for this run. Neurons [0..N_INPUT-1] are
+    inputs, [OUTPUT_IDX] is the output, and everything from HIDDEN_START to N-1
+    (whatever's left over) becomes free hidden units."""
+    global N
+    if n_neurons < HIDDEN_START:
+        raise ValueError(
+            f"n_neurons={n_neurons} is too few neurons for the fixed input and "
+            f"output assignments (need at least {HIDDEN_START})."
+        )
+    N = n_neurons
 
 # ==== TUNABLE SIMULATION CONSTANTS ============================================
 # These are per-run experiment parameters, not fixed structure: they start as

@@ -2,7 +2,7 @@
 
 import torch
 
-from sim_core.constants import N
+from sim_core import constants
 from sim_core.fitness_terms import compute_l1_penalty
 from sim_core.genome_codec import sample_initial_weights, unflatten_genome
 from sim_core.maze_task import simulate_training_phase
@@ -433,7 +433,7 @@ def evaluate_generation(genome_flat, device, noise_generator, reward_generator, 
     W_init = sample_initial_weights(pop, device, weight_init_generator)
 
     frob_start = torch.linalg.matrix_norm(W_init, ord="fro", dim=(1, 2))
-    state0 = torch.zeros(pop, N, device=device)
+    state0 = torch.zeros(pop, constants.N, device=device)
     state_final, W_final, training_reward, replay_reward, tracking = _run_paradigm(
         genome, paradigm_phases, device, noise_generator, reward_generator, should_print,
         context_cues_on, sensory_cues_on, state0, W_init,

@@ -17,6 +17,7 @@ MASTER_SEEDS = range(25)   # 0..24
 BASE_CONFIG = {
     "master_seed": None,   # overwritten per file by build_config()
     "device": "cuda",
+    "n_neurons": 15,
     "noise_seed": 1,
     "reward_seed": 2,
     "test_seed": 3,

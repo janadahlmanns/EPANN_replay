@@ -34,10 +34,9 @@ from analysis.decision_plotting import (
     sort_by_fitness,
 )
 from analysis.results_io import results_filename, save_results_h5
-from sim_core import constants
+from sim_core import constants, genome_codec
 from sim_core.constants import INPUT_SENSORY_A, INPUT_SENSORY_B
 from sim_core.fitness import configure_printing, fitness_function, get_printing_history
-from sim_core.genome_codec import GENOME_LENGTH, GENOME_SPEC
 from sim_core.paradigm import PHASE_REPLAY, parse_paradigm
 
 # ==== 2) CONFIG LOADING + OUTPUT LOCATION =======================================
@@ -63,6 +62,8 @@ RUN_TIMESTAMP = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")  # microsec
                                                                        # config can never collide
 RUN_DIR = OUTPUT_ROOT / f"{RUN_NAME}_{RUN_TIMESTAMP}"  # everything this run produces lives here
 DEVICE = CONFIG["device"]
+N_NEURONS = CONFIG["n_neurons"]  # total neurons; see constants.configure_network() for the fixed
+                                  # input/output assignment + derived hidden-neuron count
 MASTER_SEED = CONFIG["master_seed"]
 NOISE_SEED = CONFIG["noise_seed"]
 REWARD_SEED = CONFIG["reward_seed"]
@@ -101,9 +102,12 @@ MAX_RUNS_PREVIEW = CONFIG["max_runs_preview"]
 HIST_BIN_WIDTH = CONFIG["hist_bin_width"]
 PLOT_DPI = 180  # presentation-only, not an experiment parameter -- stays fixed
 
-# Tunable sim_core constants (reward shaping + CTRNN dynamics) -- set once, here,
-# before any simulation code runs; sim_core modules read constants.X live at call
-# time, so this is the only place that needs to know about the config file.
+# Network layout + tunable sim_core constants (reward shaping + CTRNN dynamics) --
+# set once, here, before any simulation code runs; sim_core modules read
+# constants.X live at call time, so this is the only place that needs to know
+# about the config file. configure_network() must run before genome_codec's
+# functions are called (they size tensors from constants.N).
+constants.configure_network(n_neurons=N_NEURONS)
 constants.configure(
     dt=CONFIG["dt"],
     tau=CONFIG["tau"],
@@ -115,6 +119,9 @@ constants.configure(
     turn_reward_big=CONFIG["turn_reward_big"],
     turn_reward_small=CONFIG["turn_reward_small"],
 )
+
+GENOME_SPEC = genome_codec.genome_spec()
+GENOME_LENGTH = genome_codec.genome_length()
 
 DECISIONS_FILENAME = "decisions.png"
 ALL_DECISIONS_FILENAME = "all_decisions.png"
