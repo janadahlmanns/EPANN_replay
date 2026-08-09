@@ -11,7 +11,7 @@ import random
 
 # ==== 2. CONSTANTS / USER INPUTS ============================================
 OUTPUT_FOLDER = Path("C:/EPANN_replay/configs/batch_to_run")
-FILENAME_PREFIX = "ep_r250_"   # files are named f"{FILENAME_PREFIX}{seed}.json"
+FILENAME_PREFIX = "reward_test_r100_std005_"   # files are named f"{FILENAME_PREFIX}{seed}.json"
 
 n_configs = 25   # number of configs to generate (and thus seeds to vary)
 
@@ -35,7 +35,7 @@ WEIGHT_INIT_SEEDS = [random.randint(0, 1000) for _ in range(n_configs)]
 BASE_CONFIG = {
     "master_seed": None,   # overwritten per file by build_config()
     "device": "cuda",
-    "n_neurons": 8,
+    "n_neurons": 9,
     "noise_seed": None,
     "reward_seed": None,
     "test_seed": None,
@@ -46,8 +46,8 @@ BASE_CONFIG = {
     "paradigm": "trainA, 50, replay, 10, trainB, 50",
     "num_generations": 300,
     "search_popsize": 200,
-    "radius_init": 250,
-    "stdev_learning_rate": 0.1,
+    "radius_init": 100,
+    "stdev_learning_rate": 0.05,
     "momentum": 0.9,
     "l1_lambda": 0.001,
     "tracked_per_interval": 50,

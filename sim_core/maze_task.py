@@ -34,6 +34,18 @@ from sim_core.constants import N_INPUT, OUTPUT_IDX, TICKS_PER_RUN
 from sim_core.ctrnn import activation_step, plasticity_step
 
 
+# ==== ONLINE REWARD SIGNAL (spec 3.11) ========================================
+# The reward input neuron carries the reward/penalty earned by the PREVIOUS tick's
+# action -- the tick that earned it can't feed it into its own input vector because
+# that tick's output is already produced before its outcome is known. So a reward
+# earned at tick t is presented as the input at tick t+1, then goes back to 0 at
+# t+2. This is unconditional (unlike context/sensory cues, it isn't gated by any
+# on/off flag) and separate from `total_reward`/evolutionary fitness -- callers
+# that need reward WITHOUT it counting toward fitness (e.g. a future unrewarded
+# exploration phase) still get it wired into the network here; they just don't
+# feed this function's total_reward into the fitness computation.
+
+
 # ==== HELPERS =================================================================
 def _draw_reward_arm(pop, reward_generator, device):
     return torch.randint(0, 2, (pop,), generator=reward_generator, device=device)
@@ -115,6 +127,8 @@ def simulate_training_phase(state, W, M, A, B, C, D, beta, eta,
         sensory_b,
     ) = _initialize_training_phase(state, context, reward_generator, device)
 
+    recent_reward = torch.zeros(pop, device=device)  # reward earned last tick; fed as this tick's input, see module docstring
+
     tracking = None
     current_turn_choice = None
     if collect_tracking:
@@ -151,7 +165,8 @@ def simulate_training_phase(state, W, M, A, B, C, D, beta, eta,
         input_sensory_b = sensory_b if sensory_cues_on else torch.zeros_like(sensory_b)
         input_vec = torch.stack(
             [is_home, is_turn_tick.float(), is_end_tick.float(),
-             input_context_a, input_context_b, input_sensory_a, input_sensory_b], dim=1,
+             input_context_a, input_context_b, input_sensory_a, input_sensory_b,
+             recent_reward], dim=1,
         )
 
         # --- CTRNN tick: clamp inputs, advance state, apply plasticity ---
@@ -199,6 +214,7 @@ def simulate_training_phase(state, W, M, A, B, C, D, beta, eta,
         reward_delta = torch.where(turned_correctly, turn_reward, reward_delta)
         reward_delta = torch.where(got_reward, arm_reward, reward_delta)
         total_reward += reward_delta
+        recent_reward = reward_delta  # fed as the reward-input neuron's value on the NEXT tick
 
         # --- terminate / reset finished runs (only crash or reaching mazeend end a run) ---
         terminate = crash | got_reward

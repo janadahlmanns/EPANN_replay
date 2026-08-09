@@ -3,12 +3,12 @@
 # ==== NETWORK LAYOUT =========================================================
 # neuron index mapping: [0..N_INPUT-1] = inputs, [OUTPUT_IDX] = output,
 # [HIDDEN_START..N-1] = hidden units (however many are left over once N is fixed).
-# N_INPUT/OUTPUT_IDX/HIDDEN_START are structural (always 7/7/8) -- N itself is a
+# N_INPUT/OUTPUT_IDX/HIDDEN_START are structural (always 8/8/9) -- N itself is a
 # per-run experiment parameter, set via configure_network() below (must be called
 # before any code computes tensor shapes from N; see genome_codec.py's docstring).
-N_INPUT = 7
-OUTPUT_IDX = 7
-HIDDEN_START = 8
+N_INPUT = 8
+OUTPUT_IDX = 8
+HIDDEN_START = 9
 
 N = None
 
@@ -20,6 +20,13 @@ INPUT_CONTEXT_A = 3
 INPUT_CONTEXT_B = 4
 INPUT_SENSORY_A = 5
 INPUT_SENSORY_B = 6
+# online reward signal (spec 3.11): the reward/penalty this run's task just paid out
+# (e.g. CRASH_PENALTY, TURN_REWARD_*, BIG/SMALL_REWARD), presented as this neuron's
+# input for exactly one tick -- the tick AFTER the tick that earned it, since the
+# outcome of tick t isn't known until after tick t's output has already been produced
+# -- then back to 0. Maze-task-only: replay_task.py zeros all N_INPUT channels
+# uniformly and never needs a task-specific reward value.
+INPUT_REWARD = 7
 
 
 def configure_network(n_neurons):
