@@ -27,6 +27,7 @@ import re
 import subprocess
 import sys
 import threading
+import json
 from collections import Counter
 from pathlib import Path
 
@@ -53,6 +54,7 @@ RUN_EVOLUTION_SCRIPT = PROJECT_ROOT / "runners" / "run_evolution.py"
 DATA_ROOT = PROJECT_ROOT / "data"
 RUN_IN_PARALLEL = 1  # how many config chains to run concurrently -- only raise this if you're at
                      # the computer and sure the sims haven't grown enough to fight over GPU memory
+OVERRIDE_DEVICE = "cuda:1"  # this batch runner explicitly forces all child runs onto GPU 1
 
 ROOT_GROUP_KEY = ""  # sentinel group key for "no subfolder, straight into the experiment root"
 GROUP_STEM_PATTERN = re.compile(r"^(.*)_(\d+)$")  # "<group>_<trailing integer>"
@@ -109,18 +111,36 @@ def _group_label(group_key):
 
 
 # ==== 4) BATCH EXECUTION =========================================================
+def _write_temp_device_override_config(config_path, chain_idx):
+    """Write a temporary sibling config whose device field is forcibly set for this batch run."""
+    with open(config_path, "r", encoding="utf-8") as handle:
+        config = json.load(handle)
+    config["device"] = OVERRIDE_DEVICE
+
+    temp_stem = f"{config_path.stem}__batch65_0_cuda1_chain{chain_idx}_pid{os.getpid()}"
+    temp_path = config_path.with_name(f"{temp_stem}.json")
+    with open(temp_path, "w", encoding="utf-8") as handle:
+        json.dump(config, handle, indent=2)
+        handle.write("\n")
+    return temp_path
+
+
 def _run_chain(chain_idx, chain_config_paths, group_of):
     for config_path in chain_config_paths:
         print(f"\n{'=' * 90}\nCHAIN {chain_idx}: {config_path.name}\n{'=' * 90}\n")
-        # run_evolution.py resolves its config_name argument as configs/<name>.json,
-        # so "batch_to_run/<stem>" reaches this config the same way
-        config_name = f"batch_to_run65_0/{config_path.stem}"
-        group_key = group_of[config_path]
-        experiment_name = EXPERIMENT_NAME if group_key == ROOT_GROUP_KEY else f"{EXPERIMENT_NAME}/{group_key}"
-        subprocess.run(
-            [sys.executable, str(RUN_EVOLUTION_SCRIPT), config_name, experiment_name],
-            check=True,
-        )
+        temp_config_path = _write_temp_device_override_config(config_path, chain_idx)
+        try:
+            # run_evolution.py resolves its config_name argument as configs/<name>.json,
+            # so "batch_to_run65_0/<stem>" reaches this config the same way
+            config_name = f"batch_to_run65_0/{temp_config_path.stem}"
+            group_key = group_of[config_path]
+            experiment_name = EXPERIMENT_NAME if group_key == ROOT_GROUP_KEY else f"{EXPERIMENT_NAME}/{group_key}"
+            subprocess.run(
+                [sys.executable, str(RUN_EVOLUTION_SCRIPT), config_name, experiment_name],
+                check=True,
+            )
+        finally:
+            temp_config_path.unlink(missing_ok=True)
 
 
 def _resolve_run_dir(config_stem, search_root):
