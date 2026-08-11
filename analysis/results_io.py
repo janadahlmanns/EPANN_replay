@@ -5,6 +5,10 @@ directory alone is enough to reproduce and re-inspect the experiment later.
 
 File layout (see save_results_h5):
     meta/                          .attrs: config_json, run_name, timestamp, ...
+    meta/config/                   .attrs: same config, unwrapped into individual
+                                    name/value attrs for human readability -- the
+                                    packed config_json attr above is the one other
+                                    scripts should parse back
     genome/final_population/       final PGPE population genome tensors + fitness
     genome/center/                 final PGPE distribution mean, as a genome
     genome/stdev/                  final PGPE distribution stdev, as a genome
@@ -80,6 +84,31 @@ def _write_tracked_records(h5_group, tracked_generations, tracked_records):
 
 
 # ==== 4) TOP-LEVEL WRITE/READ ENTRYPOINTS =======================================
+def _flatten_config(config, prefix=""):
+    """Recursively flatten a (possibly nested) config dict into {"a/b/c": leaf_value}.
+    Blind to whatever keys config actually has, so this needs no updates when config
+    keys are added/removed/renamed -- it just walks whatever dict it's given."""
+    flat = {}
+    for key, value in config.items():
+        flat_key = f"{prefix}{key}"
+        if isinstance(value, dict):
+            flat.update(_flatten_config(value, prefix=f"{flat_key}/"))
+        else:
+            flat[flat_key] = value
+    return flat
+
+
+def _write_readable_config(h5_group, config):
+    """Write config a second time as individual name/value attrs (on top of the
+    single packed config_json attr) purely so a human browsing the .h5 in an HDF5
+    viewer/h5py shell can read config values directly, without parsing JSON. Tiny
+    amount of duplicated data, not meant for scripts to read back."""
+    for key, value in _flatten_config(config).items():
+        # h5py attrs need a plain scalar/string/array type; str() covers anything else
+        # (e.g. a list of mixed types) rather than erroring on some future config shape
+        h5_group.attrs[key] = value if isinstance(value, (int, float, str, bool)) else str(value)
+
+
 def save_results_h5(path, config, run_metadata, searcher, history, pgpe_history):
     """Write one run's full numeric results plus its config/metadata to path."""
     with h5py.File(path, "w") as h5_file:
@@ -87,6 +116,7 @@ def save_results_h5(path, config, run_metadata, searcher, history, pgpe_history)
         meta_group.attrs["config_json"] = json.dumps(config, indent=2)
         for key, value in run_metadata.items():
             meta_group.attrs[key] = str(value)  # str() guards against non-plain-str subclasses (e.g. TorchVersion)
+        _write_readable_config(h5_file.create_group("meta/config"), config)
 
         _write_final_genomes(h5_file, searcher)
 

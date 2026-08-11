@@ -11,7 +11,7 @@ import random
 
 # ==== 2. CONSTANTS / USER INPUTS ============================================
 OUTPUT_FOLDER = Path("C:/EPANN_replay/configs/batch_to_run")
-FILENAME_PREFIX = "reward_test_r100_std005_"   # files are named f"{FILENAME_PREFIX}{seed}.json"
+FILENAME_PREFIX = "radius_200_std_001_"   # files are named f"{FILENAME_PREFIX}{seed}.json"
 
 n_configs = 25   # number of configs to generate (and thus seeds to vary)
 
@@ -46,8 +46,8 @@ BASE_CONFIG = {
     "paradigm": "trainA, 50, replay, 10, trainB, 50",
     "num_generations": 300,
     "search_popsize": 200,
-    "radius_init": 100,
-    "stdev_learning_rate": 0.05,
+    "radius_init": 200,
+    "stdev_learning_rate": 0.01,
     "momentum": 0.9,
     "l1_lambda": 0.001,
     "tracked_per_interval": 50,
