@@ -94,7 +94,6 @@ def _assign_groups(config_paths):
     stems = [_group_stem(path) for path in config_paths]
     stem_counts = Counter(stem for stem in stems if stem is not None)
     real_groups = {stem for stem, count in stem_counts.items() if count >= 2}
-
     if len(real_groups) < 2:
         return {path: ROOT_GROUP_KEY for path in config_paths}
     return {
