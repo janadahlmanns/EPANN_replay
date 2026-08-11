@@ -5,12 +5,11 @@ import os
 
 os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
 
-import sys
-
 import datetime
 import functools
 import json
 import shutil
+import sys
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -144,6 +143,20 @@ WEIGHT_HIST_BINS = 80
 
 # Decision-outcome color/label scheme (DECISION_COLORS/LABELS/N_DECISION_CATEGORIES)
 # lives in analysis/decision_plotting.py now, shared with run_batch.py's facet plots.
+
+
+def _validate_device_or_raise(device):
+    if device != "cuda":
+        return
+    if torch.cuda.is_available():
+        return
+    raise RuntimeError(
+        "Config requests device='cuda', but PyTorch CUDA is unavailable in this environment. "
+        f"torch={torch.__version__}, torch.version.cuda={torch.version.cuda}, "
+        f"cuda_device_count={torch.cuda.device_count()}. "
+        "Use a driver/runtime compatible with this PyTorch wheel, install a matching PyTorch build, "
+        "or change the config device to 'cpu'."
+    )
 
 
 # ==== 3) PGPE DIAGNOSTIC TRACKING ==============================================
@@ -721,6 +734,8 @@ def _save_all_plots_and_results(searcher, history, pgpe_history):
 
 
 # ==== 5) EVOLUTION RUN ==========================================================
+_validate_device_or_raise(DEVICE)
+
 torch.manual_seed(MASTER_SEED)
 torch.cuda.manual_seed_all(MASTER_SEED)
 torch.use_deterministic_algorithms(True)
