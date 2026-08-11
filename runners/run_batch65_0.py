@@ -52,7 +52,7 @@ from analysis.results_io import load_results_h5, results_filename
 BATCH_FOLDER = PROJECT_ROOT / "configs" / "batch_to_run65_0"  # fixed location -- put all input json to be run into this folder, script then runs all consecutively
 RUN_EVOLUTION_SCRIPT = PROJECT_ROOT / "runners" / "run_evolution.py"
 DATA_ROOT = PROJECT_ROOT / "data"
-RUN_IN_PARALLEL = 2  # how many config chains to run concurrently -- only raise this if you're at
+RUN_IN_PARALLEL = 3  # how many config chains to run concurrently -- only raise this if you're at
                      # the computer and sure the sims haven't grown enough to fight over GPU memory
 OVERRIDE_DEVICE = "cuda:0"  # this batch runner explicitly forces all child runs onto GPU 0
 TEMP_CONFIG_FOLDER = PROJECT_ROOT / "configs" / f"_run_batch65_0_device_override_pid{os.getpid()}"
