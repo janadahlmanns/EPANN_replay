@@ -54,7 +54,9 @@ RUN_EVOLUTION_SCRIPT = PROJECT_ROOT / "runners" / "run_evolution.py"
 DATA_ROOT = PROJECT_ROOT / "data"
 RUN_IN_PARALLEL = 2  # how many config chains to run concurrently -- only raise this if you're at
                      # the computer and sure the sims haven't grown enough to fight over GPU memory
-OVERRIDE_DEVICE = "cuda:0"  # this batch runner explicitly forces all child runs onto GPU 1
+OVERRIDE_DEVICE = "cuda:0"  # this batch runner explicitly forces all child runs onto GPU 0
+TEMP_CONFIG_FOLDER = PROJECT_ROOT / "configs" / f"_run_batch65_0_device_override_pid{os.getpid()}"
+TEMP_CONFIG_NAME_PREFIX = TEMP_CONFIG_FOLDER.relative_to(PROJECT_ROOT / "configs").as_posix()
 
 ROOT_GROUP_KEY = ""  # sentinel group key for "no subfolder, straight into the experiment root"
 GROUP_STEM_PATTERN = re.compile(r"^(.*)_(\d+)$")  # "<group>_<trailing integer>"
@@ -112,13 +114,13 @@ def _group_label(group_key):
 
 # ==== 4) BATCH EXECUTION =========================================================
 def _write_temp_device_override_config(config_path, chain_idx):
-    """Write a temporary sibling config whose device field is forcibly set for this batch run."""
+    """Write a temporary same-stem config in a dedicated folder so run names stay unchanged."""
     with open(config_path, "r", encoding="utf-8") as handle:
         config = json.load(handle)
     config["device"] = OVERRIDE_DEVICE
 
-    temp_stem = f"{config_path.stem}__batch65_0_cuda1_chain{chain_idx}_pid{os.getpid()}"
-    temp_path = config_path.with_name(f"{temp_stem}.json")
+    TEMP_CONFIG_FOLDER.mkdir(parents=True, exist_ok=True)
+    temp_path = TEMP_CONFIG_FOLDER / config_path.name
     with open(temp_path, "w", encoding="utf-8") as handle:
         json.dump(config, handle, indent=2)
         handle.write("\n")
@@ -131,8 +133,9 @@ def _run_chain(chain_idx, chain_config_paths, group_of):
         temp_config_path = _write_temp_device_override_config(config_path, chain_idx)
         try:
             # run_evolution.py resolves its config_name argument as configs/<name>.json,
-            # so "batch_to_run65_0/<stem>" reaches this config the same way
-            config_name = f"batch_to_run65_0/{temp_config_path.stem}"
+            # so "<temp subfolder>/<stem>" reaches this overridden copy while preserving
+            # the original config stem for normal output naming/grouping.
+            config_name = f"{TEMP_CONFIG_NAME_PREFIX}/{temp_config_path.stem}"
             group_key = group_of[config_path]
             experiment_name = EXPERIMENT_NAME if group_key == ROOT_GROUP_KEY else f"{EXPERIMENT_NAME}/{group_key}"
             subprocess.run(
@@ -141,6 +144,10 @@ def _run_chain(chain_idx, chain_config_paths, group_of):
             )
         finally:
             temp_config_path.unlink(missing_ok=True)
+            try:
+                TEMP_CONFIG_FOLDER.rmdir()
+            except OSError:
+                pass
 
 
 def _resolve_run_dir(config_stem, search_root):
