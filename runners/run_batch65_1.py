@@ -49,12 +49,12 @@ from analysis.decision_plotting import (
 from analysis.results_io import load_results_h5, results_filename
 
 # ==== 2) CONSTANTS / USER INPUTS =================================================
-BATCH_FOLDER = PROJECT_ROOT / "configs" / "batch_to_run65_0"  # fixed location -- put all input json to be run into this folder, script then runs all consecutively
+BATCH_FOLDER = PROJECT_ROOT / "configs" / "batch_to_run65_1"  # fixed location -- put all input json to be run into this folder, script then runs all consecutively
 RUN_EVOLUTION_SCRIPT = PROJECT_ROOT / "runners" / "run_evolution.py"
 DATA_ROOT = PROJECT_ROOT / "data"
-RUN_IN_PARALLEL = 2  # how many config chains to run concurrently -- only raise this if you're at
+RUN_IN_PARALLEL = 3  # how many config chains to run concurrently -- only raise this if you're at
                      # the computer and sure the sims haven't grown enough to fight over GPU memory
-OVERRIDE_DEVICE = "cuda:0"  # this batch runner explicitly forces all child runs onto GPU 1
+OVERRIDE_DEVICE = "cuda:1"  # this batch runner explicitly forces all child runs onto GPU 1
 
 ROOT_GROUP_KEY = ""  # sentinel group key for "no subfolder, straight into the experiment root"
 GROUP_STEM_PATTERN = re.compile(r"^(.*)_(\d+)$")  # "<group>_<trailing integer>"
@@ -65,7 +65,7 @@ INPUT_WEIGHING_FACET_FILENAME = "input_weighing_facet.png"
 REWARD_EVOLUTION_COLORS = ["#E07A5F", "#3D405B", "#81B29A"]  # matches run_evolution.py's palette
 
 if len(sys.argv) != 2:
-    raise ValueError("Usage: python run_batch65_0.py <experiment_name>")
+    raise ValueError("Usage: python run_batch65_1.py <experiment_name>")
 EXPERIMENT_NAME = sys.argv[1]
 OUTPUT_ROOT = DATA_ROOT / EXPERIMENT_NAME
 
@@ -117,7 +117,7 @@ def _write_temp_device_override_config(config_path, chain_idx):
         config = json.load(handle)
     config["device"] = OVERRIDE_DEVICE
 
-    temp_stem = f"{config_path.stem}__batch65_0_cuda1_chain{chain_idx}_pid{os.getpid()}"
+    temp_stem = f"{config_path.stem}__batch65_1_cuda1_chain{chain_idx}_pid{os.getpid()}"
     temp_path = config_path.with_name(f"{temp_stem}.json")
     with open(temp_path, "w", encoding="utf-8") as handle:
         json.dump(config, handle, indent=2)
@@ -131,8 +131,8 @@ def _run_chain(chain_idx, chain_config_paths, group_of):
         temp_config_path = _write_temp_device_override_config(config_path, chain_idx)
         try:
             # run_evolution.py resolves its config_name argument as configs/<name>.json,
-            # so "batch_to_run65_0/<stem>" reaches this config the same way
-            config_name = f"batch_to_run65_0/{temp_config_path.stem}"
+            # so "batch_to_run65_1/<stem>" reaches this config the same way
+            config_name = f"batch_to_run65_1/{temp_config_path.stem}"
             group_key = group_of[config_path]
             experiment_name = EXPERIMENT_NAME if group_key == ROOT_GROUP_KEY else f"{EXPERIMENT_NAME}/{group_key}"
             subprocess.run(
