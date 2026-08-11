@@ -60,6 +60,7 @@ TEMP_CONFIG_NAME_PREFIX = TEMP_CONFIG_FOLDER.relative_to(PROJECT_ROOT / "configs
 
 ROOT_GROUP_KEY = ""  # sentinel group key for "no subfolder, straight into the experiment root"
 GROUP_STEM_PATTERN = re.compile(r"^(.*)_(\d+)$")  # "<group>_<trailing integer>"
+RUN_DIR_TIMESTAMP_PATTERN = re.compile(r"^\d{8}-\d{6}$")
 
 PLOT_DPI = 180
 DECISIONS_FACET_FILENAME = "final_generation_decisions_facet.png"
@@ -151,13 +152,20 @@ def _run_chain(chain_idx, chain_config_paths, group_of):
 
 
 def _resolve_run_dir(config_stem, search_root):
-    """Find the (single) timestamped result folder run_evolution.py just created for
-    this config. Sorts lexicographically and takes the last match so a leftover
-    folder from a previous batch under the same experiment name can't get picked
-    over this run's fresh one (timestamp format is lexicographically sortable)."""
-    matches = sorted(search_root.glob(f"{config_stem}_*"))
+    """Find the newest normal run folder for this config, ignoring legacy temp-name folders."""
+    matches = []
+    for path in search_root.glob(f"{config_stem}_*"):
+        if not path.is_dir():
+            continue
+        suffix = path.name.removeprefix(f"{config_stem}_")
+        if RUN_DIR_TIMESTAMP_PATTERN.fullmatch(suffix):
+            matches.append(path)
+    matches.sort()
     if not matches:
-        raise FileNotFoundError(f"No result folder found for config '{config_stem}' under {search_root}")
+        raise FileNotFoundError(
+            f"No normal result folder found for config '{config_stem}' under {search_root}. "
+            "Expected folders named like '<config_stem>_YYYYMMDD-HHMMSS'."
+        )
     return matches[-1]
 
 
