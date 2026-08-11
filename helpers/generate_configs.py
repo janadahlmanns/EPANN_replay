@@ -10,7 +10,8 @@ from pathlib import Path
 import random 
 
 # ==== 2. CONSTANTS / USER INPUTS ============================================
-OUTPUT_FOLDER = Path("C:/EPANN_replay/configs/batch_to_run")
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+OUTPUT_FOLDER = PROJECT_ROOT / "configs" / "batch_to_run"
 FILENAME_PREFIX = "radius_200_std_001_"   # files are named f"{FILENAME_PREFIX}{seed}.json"
 
 n_configs = 25   # number of configs to generate (and thus seeds to vary)

@@ -19,7 +19,8 @@ from pathlib import Path
 import random
 
 # ==== 2. CONSTANTS / USER INPUTS ============================================
-OUTPUT_FOLDER = Path("C:/EPANN_replay/configs/generated_sweep")
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+OUTPUT_FOLDER = PROJECT_ROOT / "configs" / "generated_sweep"
 FILENAME_PREFIX = "sweep_"   # files are named f"{FILENAME_PREFIX}{combo_slug}_{i}.json"
 
 # Parameters to sweep -- the cartesian product of every list below becomes one

@@ -7,13 +7,15 @@ os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
 
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
 import datetime
 import functools
 import json
 import shutil
 from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+sys.path.insert(0, str(PROJECT_ROOT))
 
 import evotorch
 import matplotlib.pyplot as plt
@@ -46,8 +48,8 @@ from sim_core.paradigm import PHASE_REPLAY, parse_paradigm
 # reaches configs/batch_to_run/<name>.json the same way, by passing
 # "batch_to_run/<name>" as that same argument. No defaults/fallbacks on the
 # config contents -- a missing or malformed field fails loudly (KeyError), on purpose.
-CONFIGS_ROOT = Path("C:/EPANN_replay/configs")
-DATA_ROOT = Path("C:/EPANN_replay/data")
+CONFIGS_ROOT = PROJECT_ROOT / "configs"
+DATA_ROOT = PROJECT_ROOT / "data"
 
 if len(sys.argv) != 3:
     raise ValueError("Usage: python run_evolution.py <config_name> <experiment_name>")

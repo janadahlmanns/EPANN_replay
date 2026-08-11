@@ -30,7 +30,9 @@ import threading
 from collections import Counter
 from pathlib import Path
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+sys.path.insert(0, str(PROJECT_ROOT))
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -46,9 +48,9 @@ from analysis.decision_plotting import (
 from analysis.results_io import load_results_h5, results_filename
 
 # ==== 2) CONSTANTS / USER INPUTS =================================================
-BATCH_FOLDER = Path("C:/EPANN_replay/configs/batch_to_run")  # fixed location -- put all input json to be run into this folder, script then runs all consecutively
-RUN_EVOLUTION_SCRIPT = Path("C:/EPANN_replay/runners/run_evolution.py")
-DATA_ROOT = Path("C:/EPANN_replay/data")
+BATCH_FOLDER = PROJECT_ROOT / "configs" / "batch_to_run"  # fixed location -- put all input json to be run into this folder, script then runs all consecutively
+RUN_EVOLUTION_SCRIPT = PROJECT_ROOT / "runners" / "run_evolution.py"
+DATA_ROOT = PROJECT_ROOT / "data"
 RUN_IN_PARALLEL = 2  # how many config chains to run concurrently -- only raise this if you're at
                      # the computer and sure the sims haven't grown enough to fight over GPU memory
 
