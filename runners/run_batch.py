@@ -118,7 +118,56 @@ def _group_label(group_key):
 
 
 # ==== 4) BATCH EXECUTION =========================================================
-def _run_chain(chain_idx, chain_config_paths, group_of):
+# Group facet plots are attempted after EVERY config finishes (not just once at the
+# very end) -- see _maybe_plot_group. _PLOTTED_GROUPS/_PLOT_LOCK are this script's
+# only cross-thread coordination: multiple chains can each finish the last config of
+# the same group at nearly the same moment, and the lock + already-plotted check keep
+# that from racing into a duplicate (or file-corrupting concurrent-write) plot.
+_PLOTTED_GROUPS = set()
+_PLOT_LOCK = threading.Lock()
+
+
+def _find_run_dir(config_stem, search_root):
+    """Find the (single) timestamped result folder run_evolution.py creates for this
+    config, or None if it doesn't exist (yet, or ever -- e.g. that config's run
+    crashed). Sorts lexicographically and takes the last match so a leftover folder
+    from a previous batch under the same experiment name can't get picked over this
+    run's fresh one (timestamp format is lexicographically sortable)."""
+    matches = sorted(search_root.glob(f"{config_stem}_*"))
+    return matches[-1] if matches else None
+
+
+def _maybe_plot_group(group_key, group_of, config_paths):
+    """Called after every config finishes. Checks whether ALL configs in this config's
+    group now have a result folder on disk, and if so renders that group's facet plots
+    -- exactly once. If the group isn't complete yet (a sibling config in another chain
+    hasn't finished, or never will because it crashed), this just returns quietly
+    instead of raising -- so one crashed/still-running config can no longer take the
+    whole batch runner down or block facet plots for every OTHER (finished) group.
+    A later rerun of run_batch.py, after manually re-running whatever config was
+    missing, will pick up the group's plots at that point."""
+    with _PLOT_LOCK:
+        if group_key in _PLOTTED_GROUPS:
+            return
+        group_config_paths = [path for path in config_paths if group_of[path] == group_key]
+        group_output_root = _group_output_root(group_key)
+        config_stems = [path.stem for path in group_config_paths]
+
+        run_dirs = []
+        for stem in config_stems:
+            run_dir = _find_run_dir(stem, group_output_root)
+            if run_dir is None:
+                return  # not complete yet -- next config to finish will try again
+            run_dirs.append(run_dir)
+
+        group_label = _group_label(group_key)
+        _save_decisions_facet(config_stems, run_dirs, group_output_root, group_label)
+        _save_input_weighing_facet(config_stems, run_dirs, group_output_root, group_label)
+        print(f"Saved facet plots for {group_label} to: {group_output_root}")
+        _PLOTTED_GROUPS.add(group_key)
+
+
+def _run_chain(chain_idx, chain_config_paths, config_paths, group_of):
     for config_path in chain_config_paths:
         print(f"\n{'=' * 90}\nCHAIN {chain_idx}: {config_path.name}\n{'=' * 90}\n")
         # run_evolution.py resolves its config_name argument as configs/<name>.json,
@@ -130,17 +179,7 @@ def _run_chain(chain_idx, chain_config_paths, group_of):
             [sys.executable, str(RUN_EVOLUTION_SCRIPT), config_name, experiment_name, DEVICE],
             check=True,
         )
-
-
-def _resolve_run_dir(config_stem, search_root):
-    """Find the (single) timestamped result folder run_evolution.py just created for
-    this config. Sorts lexicographically and takes the last match so a leftover
-    folder from a previous batch under the same experiment name can't get picked
-    over this run's fresh one (timestamp format is lexicographically sortable)."""
-    matches = sorted(search_root.glob(f"{config_stem}_*"))
-    if not matches:
-        raise FileNotFoundError(f"No result folder found for config '{config_stem}' under {search_root}")
-    return matches[-1]
+        _maybe_plot_group(group_key, group_of, config_paths)
 
 
 # ==== 5) CROSS-CONFIG FACET: FINAL-GENERATION DECISIONS =========================
@@ -241,7 +280,7 @@ subprocess.run([sys.executable, "-c", "import matplotlib.pyplot, torch"], check=
 chains = [config_paths[chain_idx::RUN_IN_PARALLEL] for chain_idx in range(RUN_IN_PARALLEL)]
 
 threads = [
-    threading.Thread(target=_run_chain, args=(chain_idx, chain_config_paths, group_of))
+    threading.Thread(target=_run_chain, args=(chain_idx, chain_config_paths, config_paths, group_of))
     for chain_idx, chain_config_paths in enumerate(chains)
     if chain_config_paths
 ]
@@ -252,13 +291,18 @@ for thread in threads:
 
 print(f"\nBatch complete: {len(config_paths)} runs from {BATCH_FOLDER} across {len(threads)} parallel chain(s)")
 
-for group_key in sorted(set(group_of.values()), key=lambda k: (k == ROOT_GROUP_KEY, k)):
-    group_config_paths = [path for path in config_paths if group_of[path] == group_key]
-    group_output_root = _group_output_root(group_key)
-    group_label = _group_label(group_key)
-
-    config_stems = [config_path.stem for config_path in group_config_paths]
-    run_dirs = [_resolve_run_dir(stem, group_output_root) for stem in config_stems]
-    _save_decisions_facet(config_stems, run_dirs, group_output_root, group_label)
-    _save_input_weighing_facet(config_stems, run_dirs, group_output_root, group_label)
-    print(f"Saved facet plots for {group_label} to: {group_output_root}")
+# Every group's plots are already attempted as its configs finish (see _maybe_plot_group)
+# -- this is just a diagnostic pass so an unattended/multi-server run leaves a clear
+# record of which groups (and which specific configs within them) never completed,
+# instead of you having to go hunt for missing folders by hand.
+all_group_keys = sorted(set(group_of.values()), key=lambda k: (k == ROOT_GROUP_KEY, k))
+incomplete_groups = [group_key for group_key in all_group_keys if group_key not in _PLOTTED_GROUPS]
+if incomplete_groups:
+    print(f"\n{len(incomplete_groups)} group(s) never completed -- no facet plots for these:")
+    for group_key in incomplete_groups:
+        group_output_root = _group_output_root(group_key)
+        missing_stems = [
+            path.stem for path in config_paths
+            if group_of[path] == group_key and _find_run_dir(path.stem, group_output_root) is None
+        ]
+        print(f"  {_group_label(group_key)}: missing {missing_stems}")
