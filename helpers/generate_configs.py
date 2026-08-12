@@ -35,7 +35,6 @@ WEIGHT_INIT_SEEDS = [random.randint(0, 1000) for _ in range(n_configs)]
 
 BASE_CONFIG = {
     "master_seed": None,   # overwritten per file by build_config()
-    "device": "cuda",
     "n_neurons": 9,
     "noise_seed": None,
     "reward_seed": None,

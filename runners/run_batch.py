@@ -13,12 +13,18 @@ count -- a config whose stem is unique doesn't form a group on its own.
   - 0 or 1 groups found: no subfolders at all -- every run + one shared facet-plot
     pair land directly in data/<experiment_name>/, same as if nothing were grouped.
 
-Usage: python run_batch.py <experiment_name>
+Usage: python -m runners.run_batch <config_folder> <experiment_name> <device> <n_chains>
 
-RUN_IN_PARALLEL controls how many config chains run at once (each chain still runs
-its own configs one after another). Only raise this above 1 when you know the GPU
-has headroom for it -- e.g. running 2 side by side, like manually running
-run_batch.py in two terminals on two halves of the folder.
+config_folder is looked up as configs/<config_folder>/ (just like batch_to_run used
+to be hardcoded) -- this is what lets different machines each point at their own
+folder of configs to run without touching each other's.
+
+n_chains controls how many config chains run at once (each chain still runs its own
+configs one after another). Only raise this above 1 when you know the GPU has
+headroom for it -- e.g. running 2 side by side on a machine with two GPUs.
+
+device is passed straight through to each run_evolution.py subprocess call
+(overriding any "device" field in the config json -- see run_evolution.py).
 """
 
 # ==== 1) IMPORTS =================================================================
@@ -48,11 +54,8 @@ from analysis.decision_plotting import (
 from analysis.results_io import load_results_h5, results_filename
 
 # ==== 2) CONSTANTS / USER INPUTS =================================================
-BATCH_FOLDER = PROJECT_ROOT / "configs" / "batch_to_run"  # fixed location -- put all input json to be run into this folder, script then runs all consecutively
 RUN_EVOLUTION_SCRIPT = PROJECT_ROOT / "runners" / "run_evolution.py"
 DATA_ROOT = PROJECT_ROOT / "data"
-RUN_IN_PARALLEL = 8  # how many config chains to run concurrently -- only raise this if you're at
-                     # the computer and sure the sims haven't grown enough to fight over GPU memory
 
 ROOT_GROUP_KEY = ""  # sentinel group key for "no subfolder, straight into the experiment root"
 GROUP_STEM_PATTERN = re.compile(r"^(.*)_(\d+)$")  # "<group>_<trailing integer>"
@@ -62,9 +65,15 @@ DECISIONS_FACET_FILENAME = "final_generation_decisions_facet.png"
 INPUT_WEIGHING_FACET_FILENAME = "input_weighing_facet.png"
 REWARD_EVOLUTION_COLORS = ["#E07A5F", "#3D405B", "#81B29A"]  # matches run_evolution.py's palette
 
-if len(sys.argv) != 2:
-    raise ValueError("Usage: python run_batch.py <experiment_name>")
-EXPERIMENT_NAME = sys.argv[1]
+if len(sys.argv) != 5:
+    raise ValueError("Usage: python -m runners.run_batch <config_folder> <experiment_name> <device> <n_chains>")
+CONFIG_FOLDER_NAME = sys.argv[1]  # looked up as configs/<CONFIG_FOLDER_NAME>/, never elsewhere
+EXPERIMENT_NAME = sys.argv[2]
+DEVICE = sys.argv[3]  # passed straight through to every run_evolution.py subprocess call
+RUN_IN_PARALLEL = int(sys.argv[4])  # how many config chains to run concurrently -- only raise this if
+                                     # you're sure the target machine's GPU has headroom for it
+
+BATCH_FOLDER = PROJECT_ROOT / "configs" / CONFIG_FOLDER_NAME
 OUTPUT_ROOT = DATA_ROOT / EXPERIMENT_NAME
 
 
@@ -109,29 +118,68 @@ def _group_label(group_key):
 
 
 # ==== 4) BATCH EXECUTION =========================================================
-def _run_chain(chain_idx, chain_config_paths, group_of):
+# Group facet plots are attempted after EVERY config finishes (not just once at the
+# very end) -- see _maybe_plot_group. _PLOTTED_GROUPS/_PLOT_LOCK are this script's
+# only cross-thread coordination: multiple chains can each finish the last config of
+# the same group at nearly the same moment, and the lock + already-plotted check keep
+# that from racing into a duplicate (or file-corrupting concurrent-write) plot.
+_PLOTTED_GROUPS = set()
+_PLOT_LOCK = threading.Lock()
+
+
+def _find_run_dir(config_stem, search_root):
+    """Find the (single) timestamped result folder run_evolution.py creates for this
+    config, or None if it doesn't exist (yet, or ever -- e.g. that config's run
+    crashed). Sorts lexicographically and takes the last match so a leftover folder
+    from a previous batch under the same experiment name can't get picked over this
+    run's fresh one (timestamp format is lexicographically sortable)."""
+    matches = sorted(search_root.glob(f"{config_stem}_*"))
+    return matches[-1] if matches else None
+
+
+def _maybe_plot_group(group_key, group_of, config_paths):
+    """Called after every config finishes. Checks whether ALL configs in this config's
+    group now have a result folder on disk, and if so renders that group's facet plots
+    -- exactly once. If the group isn't complete yet (a sibling config in another chain
+    hasn't finished, or never will because it crashed), this just returns quietly
+    instead of raising -- so one crashed/still-running config can no longer take the
+    whole batch runner down or block facet plots for every OTHER (finished) group.
+    A later rerun of run_batch.py, after manually re-running whatever config was
+    missing, will pick up the group's plots at that point."""
+    with _PLOT_LOCK:
+        if group_key in _PLOTTED_GROUPS:
+            return
+        group_config_paths = [path for path in config_paths if group_of[path] == group_key]
+        group_output_root = _group_output_root(group_key)
+        config_stems = [path.stem for path in group_config_paths]
+
+        run_dirs = []
+        for stem in config_stems:
+            run_dir = _find_run_dir(stem, group_output_root)
+            if run_dir is None:
+                return  # not complete yet -- next config to finish will try again
+            run_dirs.append(run_dir)
+
+        group_label = _group_label(group_key)
+        _save_decisions_facet(config_stems, run_dirs, group_output_root, group_label)
+        _save_input_weighing_facet(config_stems, run_dirs, group_output_root, group_label)
+        print(f"Saved facet plots for {group_label} to: {group_output_root}")
+        _PLOTTED_GROUPS.add(group_key)
+
+
+def _run_chain(chain_idx, chain_config_paths, config_paths, group_of):
     for config_path in chain_config_paths:
         print(f"\n{'=' * 90}\nCHAIN {chain_idx}: {config_path.name}\n{'=' * 90}\n")
         # run_evolution.py resolves its config_name argument as configs/<name>.json,
-        # so "batch_to_run/<stem>" reaches this config the same way
-        config_name = f"batch_to_run/{config_path.stem}"
+        # so "<CONFIG_FOLDER_NAME>/<stem>" reaches this config the same way
+        config_name = f"{CONFIG_FOLDER_NAME}/{config_path.stem}"
         group_key = group_of[config_path]
         experiment_name = EXPERIMENT_NAME if group_key == ROOT_GROUP_KEY else f"{EXPERIMENT_NAME}/{group_key}"
         subprocess.run(
-            [sys.executable, str(RUN_EVOLUTION_SCRIPT), config_name, experiment_name],
+            [sys.executable, str(RUN_EVOLUTION_SCRIPT), config_name, experiment_name, DEVICE],
             check=True,
         )
-
-
-def _resolve_run_dir(config_stem, search_root):
-    """Find the (single) timestamped result folder run_evolution.py just created for
-    this config. Sorts lexicographically and takes the last match so a leftover
-    folder from a previous batch under the same experiment name can't get picked
-    over this run's fresh one (timestamp format is lexicographically sortable)."""
-    matches = sorted(search_root.glob(f"{config_stem}_*"))
-    if not matches:
-        raise FileNotFoundError(f"No result folder found for config '{config_stem}' under {search_root}")
-    return matches[-1]
+        _maybe_plot_group(group_key, group_of, config_paths)
 
 
 # ==== 5) CROSS-CONFIG FACET: FINAL-GENERATION DECISIONS =========================
@@ -232,7 +280,7 @@ subprocess.run([sys.executable, "-c", "import matplotlib.pyplot, torch"], check=
 chains = [config_paths[chain_idx::RUN_IN_PARALLEL] for chain_idx in range(RUN_IN_PARALLEL)]
 
 threads = [
-    threading.Thread(target=_run_chain, args=(chain_idx, chain_config_paths, group_of))
+    threading.Thread(target=_run_chain, args=(chain_idx, chain_config_paths, config_paths, group_of))
     for chain_idx, chain_config_paths in enumerate(chains)
     if chain_config_paths
 ]
@@ -243,13 +291,18 @@ for thread in threads:
 
 print(f"\nBatch complete: {len(config_paths)} runs from {BATCH_FOLDER} across {len(threads)} parallel chain(s)")
 
-for group_key in sorted(set(group_of.values()), key=lambda k: (k == ROOT_GROUP_KEY, k)):
-    group_config_paths = [path for path in config_paths if group_of[path] == group_key]
-    group_output_root = _group_output_root(group_key)
-    group_label = _group_label(group_key)
-
-    config_stems = [config_path.stem for config_path in group_config_paths]
-    run_dirs = [_resolve_run_dir(stem, group_output_root) for stem in config_stems]
-    _save_decisions_facet(config_stems, run_dirs, group_output_root, group_label)
-    _save_input_weighing_facet(config_stems, run_dirs, group_output_root, group_label)
-    print(f"Saved facet plots for {group_label} to: {group_output_root}")
+# Every group's plots are already attempted as its configs finish (see _maybe_plot_group)
+# -- this is just a diagnostic pass so an unattended/multi-server run leaves a clear
+# record of which groups (and which specific configs within them) never completed,
+# instead of you having to go hunt for missing folders by hand.
+all_group_keys = sorted(set(group_of.values()), key=lambda k: (k == ROOT_GROUP_KEY, k))
+incomplete_groups = [group_key for group_key in all_group_keys if group_key not in _PLOTTED_GROUPS]
+if incomplete_groups:
+    print(f"\n{len(incomplete_groups)} group(s) never completed -- no facet plots for these:")
+    for group_key in incomplete_groups:
+        group_output_root = _group_output_root(group_key)
+        missing_stems = [
+            path.stem for path in config_paths
+            if group_of[path] == group_key and _find_run_dir(path.stem, group_output_root) is None
+        ]
+        print(f"  {_group_label(group_key)}: missing {missing_stems}")

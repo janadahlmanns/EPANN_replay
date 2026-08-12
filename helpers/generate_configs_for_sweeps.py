@@ -60,7 +60,6 @@ FIXED_SEEDS = {
 # always overwritten per config (see build_config()).
 BASE_CONFIG = {
     "master_seed": None,   # overwritten per file by build_config()
-    "device": "cuda",
     "n_neurons": 9,
     "noise_seed": None,
     "reward_seed": None,

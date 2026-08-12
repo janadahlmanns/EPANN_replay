@@ -110,8 +110,15 @@ def _initialize_training_phase(state, context, reward_generator, device):
 def simulate_training_phase(state, W, M, A, B, C, D, beta, eta,
                              context, num_runs, context_cues_on, sensory_cues_on,
                              noise_generator, reward_generator, device,
-                             collect_tracking=False):
-    """Runs num_runs maze runs (batched over population)."""
+                             collect_tracking=False, recorder=None):
+    """Runs num_runs maze runs (batched over population).
+
+    recorder: optional per-tick recording hook (see analysis/record_brain.py's
+    BrainRecorder) for watching a single individual live through its evaluation.
+    When None (always the case for fitness.py's real evolutionary calls), this
+    function's behavior and RNG consumption are completely unchanged -- the only
+    added cost is one `is None` check per tick. Batched tensors are passed to it
+    as-is (recorder itself owns any pop-indexing it needs)."""
     max_ticks = num_runs * TICKS_PER_RUN
     (
         pop,
@@ -197,6 +204,13 @@ def simulate_training_phase(state, W, M, A, B, C, D, beta, eta,
         crash = active & (~correct)
         got_reward = active & is_end_tick & correct
         turned_correctly = active & is_turn_tick & correct  # valid direction chosen; run continues
+
+        if recorder is not None:
+            recorder.on_training_tick(
+                run_index=run_count, step_in_run=step_in_run,
+                state=new_state, W=W, output=output,
+                crashed=crash, rewarded=got_reward,
+            )
 
         # arm_reward/turn_reward both use the same big/small-arm magnitude,
         # since a "correct" (big-reward) arm pays BIG_REWARD and a "wrong"
