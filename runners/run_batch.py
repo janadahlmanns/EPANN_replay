@@ -51,7 +51,7 @@ from analysis.results_io import load_results_h5, results_filename
 BATCH_FOLDER = PROJECT_ROOT / "configs" / "batch_to_run"  # fixed location -- put all input json to be run into this folder, script then runs all consecutively
 RUN_EVOLUTION_SCRIPT = PROJECT_ROOT / "runners" / "run_evolution.py"
 DATA_ROOT = PROJECT_ROOT / "data"
-RUN_IN_PARALLEL = 2  # how many config chains to run concurrently -- only raise this if you're at
+RUN_IN_PARALLEL = 8  # how many config chains to run concurrently -- only raise this if you're at
                      # the computer and sure the sims haven't grown enough to fight over GPU memory
 
 ROOT_GROUP_KEY = ""  # sentinel group key for "no subfolder, straight into the experiment root"
