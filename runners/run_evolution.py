@@ -50,8 +50,8 @@ from sim_core.paradigm import PHASE_REPLAY, parse_paradigm
 CONFIGS_ROOT = PROJECT_ROOT / "configs"
 DATA_ROOT = PROJECT_ROOT / "data"
 
-if len(sys.argv) != 3:
-    raise ValueError("Usage: python run_evolution.py <config_name> <experiment_name>")
+if len(sys.argv) != 4:
+    raise ValueError("Usage: python run_evolution.py <config_name> <experiment_name> <device>")
 CONFIG_PATH = CONFIGS_ROOT / f"{sys.argv[1]}.json"
 OUTPUT_ROOT = DATA_ROOT / sys.argv[2]
 with open(CONFIG_PATH, "r", encoding="utf-8") as _config_file:
@@ -62,7 +62,8 @@ RUN_TIMESTAMP = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")  # year->...->
                                                                      # alphabetical (file explorer)
                                                                      # order is chronological order
 RUN_DIR = OUTPUT_ROOT / f"{RUN_NAME}_{RUN_TIMESTAMP}"  # everything this run produces lives here
-DEVICE = CONFIG["device"]
+DEVICE = sys.argv[3]  # required CLI input -- always wins, even if the config json still has its
+                       # own (by-now-vestigial) "device" field
 N_NEURONS = CONFIG["n_neurons"]  # total neurons; see constants.configure_network() for the fixed
                                   # input/output assignment + derived hidden-neuron count
 MASTER_SEED = CONFIG["master_seed"]

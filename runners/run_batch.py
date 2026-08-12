@@ -13,12 +13,18 @@ count -- a config whose stem is unique doesn't form a group on its own.
   - 0 or 1 groups found: no subfolders at all -- every run + one shared facet-plot
     pair land directly in data/<experiment_name>/, same as if nothing were grouped.
 
-Usage: python run_batch.py <experiment_name>
+Usage: python -m runners.run_batch <config_folder> <experiment_name> <device> <n_chains>
 
-RUN_IN_PARALLEL controls how many config chains run at once (each chain still runs
-its own configs one after another). Only raise this above 1 when you know the GPU
-has headroom for it -- e.g. running 2 side by side, like manually running
-run_batch.py in two terminals on two halves of the folder.
+config_folder is looked up as configs/<config_folder>/ (just like batch_to_run used
+to be hardcoded) -- this is what lets different machines each point at their own
+folder of configs to run without touching each other's.
+
+n_chains controls how many config chains run at once (each chain still runs its own
+configs one after another). Only raise this above 1 when you know the GPU has
+headroom for it -- e.g. running 2 side by side on a machine with two GPUs.
+
+device is passed straight through to each run_evolution.py subprocess call
+(overriding any "device" field in the config json -- see run_evolution.py).
 """
 
 # ==== 1) IMPORTS =================================================================
@@ -48,11 +54,8 @@ from analysis.decision_plotting import (
 from analysis.results_io import load_results_h5, results_filename
 
 # ==== 2) CONSTANTS / USER INPUTS =================================================
-BATCH_FOLDER = PROJECT_ROOT / "configs" / "batch_to_run"  # fixed location -- put all input json to be run into this folder, script then runs all consecutively
 RUN_EVOLUTION_SCRIPT = PROJECT_ROOT / "runners" / "run_evolution.py"
 DATA_ROOT = PROJECT_ROOT / "data"
-RUN_IN_PARALLEL = 8  # how many config chains to run concurrently -- only raise this if you're at
-                     # the computer and sure the sims haven't grown enough to fight over GPU memory
 
 ROOT_GROUP_KEY = ""  # sentinel group key for "no subfolder, straight into the experiment root"
 GROUP_STEM_PATTERN = re.compile(r"^(.*)_(\d+)$")  # "<group>_<trailing integer>"
@@ -62,9 +65,15 @@ DECISIONS_FACET_FILENAME = "final_generation_decisions_facet.png"
 INPUT_WEIGHING_FACET_FILENAME = "input_weighing_facet.png"
 REWARD_EVOLUTION_COLORS = ["#E07A5F", "#3D405B", "#81B29A"]  # matches run_evolution.py's palette
 
-if len(sys.argv) != 2:
-    raise ValueError("Usage: python run_batch.py <experiment_name>")
-EXPERIMENT_NAME = sys.argv[1]
+if len(sys.argv) != 5:
+    raise ValueError("Usage: python -m runners.run_batch <config_folder> <experiment_name> <device> <n_chains>")
+CONFIG_FOLDER_NAME = sys.argv[1]  # looked up as configs/<CONFIG_FOLDER_NAME>/, never elsewhere
+EXPERIMENT_NAME = sys.argv[2]
+DEVICE = sys.argv[3]  # passed straight through to every run_evolution.py subprocess call
+RUN_IN_PARALLEL = int(sys.argv[4])  # how many config chains to run concurrently -- only raise this if
+                                     # you're sure the target machine's GPU has headroom for it
+
+BATCH_FOLDER = PROJECT_ROOT / "configs" / CONFIG_FOLDER_NAME
 OUTPUT_ROOT = DATA_ROOT / EXPERIMENT_NAME
 
 
@@ -113,12 +122,12 @@ def _run_chain(chain_idx, chain_config_paths, group_of):
     for config_path in chain_config_paths:
         print(f"\n{'=' * 90}\nCHAIN {chain_idx}: {config_path.name}\n{'=' * 90}\n")
         # run_evolution.py resolves its config_name argument as configs/<name>.json,
-        # so "batch_to_run/<stem>" reaches this config the same way
-        config_name = f"batch_to_run/{config_path.stem}"
+        # so "<CONFIG_FOLDER_NAME>/<stem>" reaches this config the same way
+        config_name = f"{CONFIG_FOLDER_NAME}/{config_path.stem}"
         group_key = group_of[config_path]
         experiment_name = EXPERIMENT_NAME if group_key == ROOT_GROUP_KEY else f"{EXPERIMENT_NAME}/{group_key}"
         subprocess.run(
-            [sys.executable, str(RUN_EVOLUTION_SCRIPT), config_name, experiment_name],
+            [sys.executable, str(RUN_EVOLUTION_SCRIPT), config_name, experiment_name, DEVICE],
             check=True,
         )
 
