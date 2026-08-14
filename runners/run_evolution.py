@@ -1,4 +1,23 @@
-"""Run PGPE with tracking output and save end-of-run plots + full numeric results."""
+"""Run PGPE with tracking output and save end-of-run plots + full numeric results.
+
+Usage: python run_evolution.py <config_name> <experiment_name> <device> <chain_label> [plateau_fitness]
+
+chain_label is just a display label for terminal output (run_batch.py passes its chain
+index; a manual run can pass anything, e.g. "manual").
+
+plateau_fitness (optional) is an early-exit criterion: if the population's best RAW
+reward (pre-L1 -- see sim_core/fitness.py's _check_plateau_termination for why not the
+post-L1 fitness) hits this EXACT value (not mean, not a tolerance band) for
+PLATEAU_WINDOW consecutive generations, the run stops there and saves everything
+normally, as if that were the final generation -- for the common case where a run has
+converged onto a local maximum (e.g. always exploiting one arm) that's never going to
+improve further, so finishing out the configured generation count is wasted compute.
+There's no way to derive this value from the config -- it depends on the reward/paradigm
+setup -- so it's given directly. Omit it to leave this criterion disabled. A SEPARATE,
+always-on early-exit criterion (zero left- or zero right-turns across the population on
+a detailed-print generation) needs no input and can't be disabled -- see
+sim_core/fitness.py's _print_tracking_block.
+"""
 
 # ==== 1) RNG DETERMINISM + PATH SETUP ==========================================
 import os
@@ -39,7 +58,7 @@ from analysis.decision_plotting import (
 from analysis.results_io import results_filename, save_results_h5
 from sim_core import constants, genome_codec
 from sim_core.constants import INPUT_SENSORY_A, INPUT_SENSORY_B
-from sim_core.fitness import configure_printing, fitness_function, get_printing_history
+from sim_core.fitness import configure_printing, fitness_function, get_printing_history, should_terminate_early
 from sim_core.paradigm import PHASE_REPLAY, parse_paradigm
 
 # ==== 2) CONFIG LOADING + OUTPUT LOCATION =======================================
@@ -52,12 +71,19 @@ from sim_core.paradigm import PHASE_REPLAY, parse_paradigm
 CONFIGS_ROOT = PROJECT_ROOT / "configs"
 DATA_ROOT = PROJECT_ROOT / "data"
 
-if len(sys.argv) != 5:
-    raise ValueError("Usage: python run_evolution.py <config_name> <experiment_name> <device> <chain_label>")
+if len(sys.argv) not in (5, 6):
+    raise ValueError(
+        "Usage: python run_evolution.py <config_name> <experiment_name> <device> <chain_label> [plateau_fitness]"
+    )
 CONFIG_PATH = CONFIGS_ROOT / f"{sys.argv[1]}.json"
 OUTPUT_ROOT = DATA_ROOT / sys.argv[2]
 CHAIN_LABEL = sys.argv[4]  # printed as "CHAIN <label>" in terminal output -- run_batch.py passes
                             # its chain index; a manual run can pass anything, e.g. "manual"
+PLATEAU_FITNESS = float(sys.argv[5]) if len(sys.argv) == 6 else None  # optional: exact best raw
+                            # (pre-L1) reward value that, if hit for PLATEAU_WINDOW straight
+                            # generations, ends the run early (see sim_core/fitness.py's
+                            # _check_plateau_termination). None (the arg omitted) disables this
+                            # early-exit criterion entirely.
 with open(CONFIG_PATH, "r", encoding="utf-8") as _config_file:
     CONFIG = json.load(_config_file)
 
@@ -777,6 +803,7 @@ configure_printing(
     max_runs_preview=MAX_RUNS_PREVIEW,
     chain_label=CHAIN_LABEL,
     config_name=RUN_NAME,
+    plateau_fitness=PLATEAU_FITNESS,
 )
 
 problem = Problem(
@@ -803,6 +830,10 @@ for _ in range(NUM_GENERATIONS):
     searcher.step()
     history_snapshot = get_printing_history()
     _collect_pgpe_history(searcher, history_snapshot["reward_evolution"], pgpe_history)
+    if should_terminate_early():
+        break  # population converged to always turning one direction -- see fitness.py's
+               # _print_tracking_block; everything below saves normally, just with fewer
+               # generations than NUM_GENERATIONS actually happened
 
 history = get_printing_history()
 _save_all_plots_and_results(searcher, history, pgpe_history)

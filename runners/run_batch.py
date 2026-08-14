@@ -13,7 +13,7 @@ count -- a config whose stem is unique doesn't form a group on its own.
   - 0 or 1 groups found: no subfolders at all -- every run + one shared facet-plot
     pair land directly in data/<experiment_name>/, same as if nothing were grouped.
 
-Usage: python -m runners.run_batch <config_folder> <experiment_name> <device> <n_chains> <log_name>
+Usage: python -m runners.run_batch <config_folder> <experiment_name> <device> <n_chains> <log_name> [plateau_fitness]
 
 config_folder is looked up as configs/<config_folder>/ (just like batch_to_run used
 to be hardcoded) -- this is what lets different machines each point at their own
@@ -36,6 +36,11 @@ log_name picks which runtime log this invocation appends to: data/runtime_log_<l
 Dropbox) across machines, and multiple machines appending to the SAME synced file is a real
 corruption risk that a same-process lock can't protect against. Every finished config appends
 one row: config name, chain, n_chains, runtime in seconds.
+
+plateau_fitness (optional) is passed straight through to every run_evolution.py subprocess
+call, same value for every config in this batch -- makes sense for a sweep that shares one
+paradigm/reward setup (the common case). See run_evolution.py's own docstring for what it does.
+Omit it entirely to leave this early-exit criterion disabled for the whole batch.
 """
 
 # ==== 1) IMPORTS =================================================================
@@ -53,6 +58,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 sys.path.insert(0, str(PROJECT_ROOT))
 
+import h5py
 import matplotlib
 matplotlib.use("Agg")  # headless, thread-safe rendering -- facet plots are now built from inside
                         # background chain threads (see _maybe_plot_group), and the default
@@ -87,11 +93,12 @@ DONE_SUBFOLDER = "done"  # finished configs get moved to <BATCH_FOLDER>/done/ --
                           # only matches direct children, so this is all that's needed to keep a
                           # rerun of run_batch.py over the same folder from reprocessing them
 
-RUNTIME_LOG_HEADER = ["config", "chain", "n_chains", "runtime_seconds"]
+RUNTIME_LOG_HEADER = ["config", "chain", "n_chains", "runtime_seconds", "generations_run", "seconds_per_generation"]
 
-if len(sys.argv) != 6:
+if len(sys.argv) not in (6, 7):
     raise ValueError(
-        "Usage: python -m runners.run_batch <config_folder> <experiment_name> <device> <n_chains> <log_name>"
+        "Usage: python -m runners.run_batch <config_folder> <experiment_name> <device> <n_chains> "
+        "<log_name> [plateau_fitness]"
     )
 CONFIG_FOLDER_NAME = sys.argv[1]  # looked up as configs/<CONFIG_FOLDER_NAME>/, never elsewhere
 EXPERIMENT_NAME = sys.argv[2]
@@ -99,6 +106,9 @@ DEVICE = sys.argv[3]  # passed straight through to every run_evolution.py subpro
 RUN_IN_PARALLEL = int(sys.argv[4])  # how many config chains to run concurrently -- only raise this if
                                      # you're sure the target machine's GPU has headroom for it
 LOG_NAME = sys.argv[5]  # picks data/runtime_log_<LOG_NAME>.csv -- one file per machine, see docstring
+PLATEAU_FITNESS_ARG = [sys.argv[6]] if len(sys.argv) == 7 else []  # forwarded as-is (a string) to
+                                                                     # every run_evolution.py subprocess
+                                                                     # call; omitted entirely if not given
 
 BATCH_FOLDER = PROJECT_ROOT / "configs" / CONFIG_FOLDER_NAME
 RUNTIME_LOG_PATH = DATA_ROOT / f"runtime_log_{LOG_NAME}.csv"
@@ -157,23 +167,6 @@ _LOG_LOCK = threading.Lock()  # guards RUNTIME_LOG_PATH -- multiple chains can f
                                # to the same shared csv at nearly the same moment
 
 
-def _log_runtime(config_path, chain_idx, runtime_seconds):
-    """Append one row to RUNTIME_LOG_PATH for this config's completed run. Writes the
-    header only the first time this particular log file is created. The lock only
-    protects against this one process's own chains racing each other -- a different
-    machine writing the SAME log file at the same time is exactly what LOG_NAME (one
-    file per machine) is meant to avoid; the lock can't protect a synced file across
-    two separate processes on two separate machines."""
-    with _LOG_LOCK:
-        write_header = not RUNTIME_LOG_PATH.exists()
-        RUNTIME_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        with open(RUNTIME_LOG_PATH, "a", newline="", encoding="utf-8") as log_file:
-            writer = csv.writer(log_file)
-            if write_header:
-                writer.writerow(RUNTIME_LOG_HEADER)
-            writer.writerow([config_path.stem, chain_idx, RUN_IN_PARALLEL, round(runtime_seconds)])
-
-
 def _find_run_dir(config_stem, search_root):
     """Find the (single) timestamped result folder run_evolution.py creates for this
     config, or None if it doesn't exist (yet, or ever -- e.g. that config's run
@@ -182,6 +175,37 @@ def _find_run_dir(config_stem, search_root):
     run's fresh one (timestamp format is lexicographically sortable)."""
     matches = sorted(search_root.glob(f"{config_stem}_*"))
     return matches[-1] if matches else None
+
+
+def _read_generations_run(run_dir, config_stem):
+    """How many generations this run's h5 file actually recorded -- may be less than
+    the config's num_generations if an early-termination criterion fired (see
+    sim_core/fitness.py). Reads just this one small dataset's shape, not the whole h5
+    file (which can be large once tracked-generation snapshots are included)."""
+    h5_path = run_dir / results_filename(config_stem)
+    with h5py.File(h5_path, "r") as h5_file:
+        return h5_file["history/reward_evolution/generation"].shape[0]
+
+
+def _log_runtime(config_path, chain_idx, runtime_seconds, generations_run):
+    """Append one row to RUNTIME_LOG_PATH for this config's completed run. Writes the
+    header only the first time this particular log file is created. The lock only
+    protects against this one process's own chains racing each other -- a different
+    machine writing the SAME log file at the same time is exactly what LOG_NAME (one
+    file per machine) is meant to avoid; the lock can't protect a synced file across
+    two separate processes on two separate machines."""
+    seconds_per_generation = runtime_seconds / generations_run
+    with _LOG_LOCK:
+        write_header = not RUNTIME_LOG_PATH.exists()
+        RUNTIME_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with open(RUNTIME_LOG_PATH, "a", newline="", encoding="utf-8") as log_file:
+            writer = csv.writer(log_file)
+            if write_header:
+                writer.writerow(RUNTIME_LOG_HEADER)
+            writer.writerow([
+                config_path.stem, chain_idx, RUN_IN_PARALLEL,
+                round(runtime_seconds), generations_run, round(seconds_per_generation, 2),
+            ])
 
 
 def _maybe_plot_group(group_key, group_of, config_paths):
@@ -245,12 +269,15 @@ def _run_chain(chain_idx, chain_config_paths, config_paths, group_of):
         experiment_name = EXPERIMENT_NAME if group_key == ROOT_GROUP_KEY else f"{EXPERIMENT_NAME}/{group_key}"
         tick = time.monotonic()
         subprocess.run(
-            [sys.executable, str(RUN_EVOLUTION_SCRIPT), config_name, experiment_name, DEVICE, str(chain_idx)],
+            [sys.executable, str(RUN_EVOLUTION_SCRIPT), config_name, experiment_name, DEVICE, str(chain_idx)]
+            + PLATEAU_FITNESS_ARG,
             check=True,
         )
         runtime_seconds = time.monotonic() - tick
         print(f"CHAIN {chain_idx}: processed {config_path.name} in {_format_duration(runtime_seconds)}")
-        _log_runtime(config_path, chain_idx, runtime_seconds)
+        run_dir = _find_run_dir(config_path.stem, _group_output_root(group_key))
+        generations_run = _read_generations_run(run_dir, config_path.stem)
+        _log_runtime(config_path, chain_idx, runtime_seconds, generations_run)
         _mark_config_done(config_path)
         _maybe_plot_group(group_key, group_of, config_paths)
 

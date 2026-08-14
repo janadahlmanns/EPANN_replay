@@ -12,6 +12,10 @@ from sim_core.replay_task import assign_replay_reward, simulate_replay_phase
 # ==== 1) CONSTANTS ==============================================================
 REPLAY_REWARD_METHOD = "zero"
 PHASE_CONTEXT = {PHASE_TRAIN_A: "A", PHASE_TRAIN_B: "B"}
+PLATEAU_WINDOW = 5  # number of consecutive generations training_reward_best (best raw reward,
+                     # pre-L1) must hit _PLATEAU_FITNESS EXACTLY (not mean, not a tolerance band)
+                     # before it counts as plateaued -- see _check_plateau_termination for why
+                     # this uses the pre-L1 reward and not the post-L1 pop_best_eval
 
 _TOTAL_GENERATIONS = None
 _PRINT_INTERVAL = None
@@ -21,6 +25,19 @@ _CHAIN_LABEL = None  # printed as "CHAIN <label>" -- identifies which run_batch.
                       # manual run) this process's terminal output belongs to
 _CONFIG_NAME = None  # printed in place of a bare population-size number, so the terminal
                       # output says which config is actually running
+_PLATEAU_FITNESS = None  # optional exact raw-reward value (see configure_printing) -- if given,
+                          # PLATEAU_WINDOW consecutive generations' training_reward_best (pre-L1)
+                          # hitting it exactly triggers early termination alongside the
+                          # turn-direction check
+
+_TERMINATE_EARLY = False  # set once EITHER: (a) a detailed-print generation shows zero left- or
+                           # zero right-turns across the whole tracked population (see
+                           # _print_tracking_block) -- converged to always turning one direction,
+                           # or (b) the best raw reward plateaus exactly at _PLATEAU_FITNESS (see
+                           # _check_plateau_termination). Either way this is wasted compute that
+                           # isn't going to recover into a viable solution. run_evolution.py's main
+                           # loop checks should_terminate_early() and stops (saving everything
+                           # normally, as if this were the last generation).
 
 _TRACKED_GENERATIONS = []
 _TRACKED_RECORDS = []
@@ -56,11 +73,15 @@ def configure_printing(
     max_runs_preview,
     chain_label,
     config_name,
+    plateau_fitness,
 ):
-    """Set printing cadence and clear history buffers for a fresh run."""
+    """Set printing cadence and clear history buffers for a fresh run. plateau_fitness:
+    None to disable the plateau-based early termination, or the exact fitness value to
+    watch pop_best_eval for (see _check_plateau_termination) -- always pass explicitly,
+    never omitted, so a disabled plateau check is a visible choice, not a silent default."""
     global _TOTAL_GENERATIONS, _PRINT_INTERVAL
     global _MAX_NETWORKS_PREVIEW, _MAX_RUNS_PREVIEW
-    global _CHAIN_LABEL, _CONFIG_NAME
+    global _CHAIN_LABEL, _CONFIG_NAME, _PLATEAU_FITNESS, _TERMINATE_EARLY
     global _TRACKED_GENERATIONS, _TRACKED_RECORDS, _REWARD_EVOLUTION, _CUE_IMPORTANCE_HISTORY
 
     _TOTAL_GENERATIONS = total_generations
@@ -69,6 +90,8 @@ def configure_printing(
     _MAX_RUNS_PREVIEW = max_runs_preview
     _CHAIN_LABEL = chain_label
     _CONFIG_NAME = config_name
+    _PLATEAU_FITNESS = plateau_fitness
+    _TERMINATE_EARLY = False
 
     _TRACKED_GENERATIONS = []
     _TRACKED_RECORDS = []
@@ -104,6 +127,13 @@ def get_printing_history():
         "reward_evolution": _REWARD_EVOLUTION,
         "cue_importance_history": _CUE_IMPORTANCE_HISTORY,
     }
+
+
+def should_terminate_early():
+    """True once _print_tracking_block has flagged a converged (all-one-direction)
+    population. The caller (run_evolution.py's main loop) is responsible for actually
+    stopping -- this module only ever sets the flag, never breaks anything itself."""
+    return _TERMINATE_EARLY
 
 
 # ==== 3) TERMINAL-FORMATTING HELPERS ===========================================
@@ -181,6 +211,8 @@ def _print_tracking_block(
     regularized_fitness_cpu,
     tracking,
 ):
+    global _TERMINATE_EARLY
+
     decisions = tracking["decisions_by_run"].detach().cpu()
     crashed = tracking["crashed_by_run"].detach().cpu()
     rewarded = tracking["rewarded_by_run"].detach().cpu()
@@ -235,11 +267,42 @@ def _print_tracking_block(
     print(f"Config: {_CONFIG_NAME}")
     print()
     print(_hstack_tables([reward_table, decisions_table, decision_preview_table]))
+    if left_turns == 0 or right_turns == 0:
+        _TERMINATE_EARLY = True
+        print(f"EARLY TERMINATION: {left_turns} left turn(s), {right_turns} right turn(s) across the "
+              "whole tracked population -- converged to turning only one direction, not going to "
+              "recover into a viable solution. Stopping here as if this were the final generation.")
     print("=" * 90)
     print()
 
 
 # ==== 5) HISTORY WRITER =========================================================
+def _check_plateau_termination(evaluation_idx):
+    """If a plateau target was given (see configure_printing), check whether the
+    population's best RAW reward (training_reward_best -- before the L1 penalty) has
+    hit it EXACTLY (not mean, not a tolerance band) for the last PLATEAU_WINDOW
+    consecutive generations, and set _TERMINATE_EARLY if so. Deliberately compares
+    against the pre-L1 reward, not pop_best_eval (post-L1): L1 penalty is computed
+    from each individual's own genome norm, which keeps drifting slightly generation
+    to generation even once task-level behavior has genuinely converged, since PGPE
+    never stops sampling new individuals -- so pop_best_eval essentially never repeats
+    bit-exactly, while training_reward_best (a sum of fixed reward constants) does.
+    Runs every generation (unlike the turn-direction check, which only runs on
+    detailed-print generations) since training_reward_best is recorded every
+    generation regardless."""
+    global _TERMINATE_EARLY
+    if _PLATEAU_FITNESS is None:
+        return
+    recent = _REWARD_EVOLUTION["training_reward_best"][-PLATEAU_WINDOW:]
+    if len(recent) < PLATEAU_WINDOW:
+        return
+    if all(value == _PLATEAU_FITNESS for value in recent):
+        _TERMINATE_EARLY = True
+        print(f"EARLY TERMINATION: best raw reward (pre-L1) has been EXACTLY {_PLATEAU_FITNESS} for "
+              f"the last {PLATEAU_WINDOW} generations (through generation {evaluation_idx}) -- "
+              "plateaued, not going to improve further. Stopping here as if this were the final generation.")
+
+
 def _record_history(
     evaluation_idx,
     regularized_fitness,
@@ -262,6 +325,7 @@ def _record_history(
     _REWARD_EVOLUTION["training_reward_mean"].append(float(tr_cpu.mean().item()))
     _REWARD_EVOLUTION["training_reward_median"].append(float(tr_cpu.median().item()))
     _REWARD_EVOLUTION["training_reward_best"].append(float(tr_cpu.max().item()))
+    _check_plateau_termination(evaluation_idx)
     _REWARD_EVOLUTION["l1_penalty_mean"].append(float(l1_cpu.mean().item()))
     _REWARD_EVOLUTION["l1_penalty_median"].append(float(l1_cpu.median().item()))
     _REWARD_EVOLUTION["l1_penalty_best"].append(float(l1_cpu.max().item()))
