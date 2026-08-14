@@ -37,6 +37,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 import threading
 from collections import Counter
 from pathlib import Path
@@ -189,6 +190,19 @@ def _mark_config_done(config_path):
     shutil.move(str(config_path), str(done_dir / config_path.name))
 
 
+def _format_duration(seconds):
+    """Human-readable Hh Mm Ss duration, dropping leading zero units (e.g. "45s",
+    "12m 03s", "2h 05m 09s")."""
+    total_seconds = int(round(seconds))
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours:
+        return f"{hours}h {minutes:02d}m {secs:02d}s"
+    if minutes:
+        return f"{minutes}m {secs:02d}s"
+    return f"{secs}s"
+
+
 def _run_chain(chain_idx, chain_config_paths, config_paths, group_of):
     for config_path in chain_config_paths:
         print(f"\n{'=' * 90}\nCHAIN {chain_idx}: {config_path.name}\n{'=' * 90}\n")
@@ -197,10 +211,13 @@ def _run_chain(chain_idx, chain_config_paths, config_paths, group_of):
         config_name = f"{CONFIG_FOLDER_NAME}/{config_path.stem}"
         group_key = group_of[config_path]
         experiment_name = EXPERIMENT_NAME if group_key == ROOT_GROUP_KEY else f"{EXPERIMENT_NAME}/{group_key}"
+        tick = time.monotonic()
         subprocess.run(
             [sys.executable, str(RUN_EVOLUTION_SCRIPT), config_name, experiment_name, DEVICE, str(chain_idx)],
             check=True,
         )
+        tock = time.monotonic()
+        print(f"CHAIN {chain_idx}: processed {config_path.name} in {_format_duration(tock - tick)}")
         _mark_config_done(config_path)
         _maybe_plot_group(group_key, group_of, config_paths)
 
