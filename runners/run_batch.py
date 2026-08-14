@@ -93,7 +93,10 @@ DONE_SUBFOLDER = "done"  # finished configs get moved to <BATCH_FOLDER>/done/ --
                           # only matches direct children, so this is all that's needed to keep a
                           # rerun of run_batch.py over the same folder from reprocessing them
 
-RUNTIME_LOG_HEADER = ["config", "chain", "n_chains", "runtime_seconds", "generations_run", "seconds_per_generation"]
+RUNTIME_LOG_HEADER = [
+    "config", "chain", "n_chains", "runtime_seconds", "generations_run",
+    "seconds_per_generation", "seconds_per_parallel_generation",
+]
 
 if len(sys.argv) not in (6, 7):
     raise ValueError(
@@ -193,8 +196,18 @@ def _log_runtime(config_path, chain_idx, runtime_seconds, generations_run):
     protects against this one process's own chains racing each other -- a different
     machine writing the SAME log file at the same time is exactly what LOG_NAME (one
     file per machine) is meant to avoid; the lock can't protect a synced file across
-    two separate processes on two separate machines."""
+    two separate processes on two separate machines.
+
+    seconds_per_generation is wall-clock time per generation for THIS chain while
+    contending with RUN_IN_PARALLEL-1 others for the GPU -- not comparable across
+    different n_chains settings on its own, since more contention slows each chain
+    down even as more total work happens per wall-clock second. Dividing by n_chains
+    (seconds_per_parallel_generation) converts it into wall-clock seconds per
+    generation of TOTAL work across the whole batch, which IS comparable: multiplying
+    it by the sum of generations_run across every config in a batch gives that batch's
+    total wall-clock runtime, regardless of how many chains it used."""
     seconds_per_generation = runtime_seconds / generations_run
+    seconds_per_parallel_generation = seconds_per_generation / RUN_IN_PARALLEL
     with _LOG_LOCK:
         write_header = not RUNTIME_LOG_PATH.exists()
         RUNTIME_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -205,6 +218,7 @@ def _log_runtime(config_path, chain_idx, runtime_seconds, generations_run):
             writer.writerow([
                 config_path.stem, chain_idx, RUN_IN_PARALLEL,
                 round(runtime_seconds), generations_run, round(seconds_per_generation, 2),
+                round(seconds_per_parallel_generation, 3),
             ])
 
 
