@@ -25,11 +25,16 @@ headroom for it -- e.g. running 2 side by side on a machine with two GPUs.
 
 device is passed straight through to each run_evolution.py subprocess call
 (overriding any "device" field in the config json -- see run_evolution.py).
+
+Each config is moved into <config_folder>/done/ the moment its run_evolution.py
+subprocess finishes successfully -- so config_folder always reflects what's still
+left to do, and rerunning run_batch.py over the same folder (e.g. after a crash)
+only reprocesses whatever wasn't moved to done/ yet.
 """
 
 # ==== 1) IMPORTS =================================================================
-import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -69,6 +74,10 @@ PLOT_DPI = 180
 DECISIONS_FACET_FILENAME = "final_generation_decisions_facet.png"
 INPUT_WEIGHING_FACET_FILENAME = "input_weighing_facet.png"
 REWARD_EVOLUTION_COLORS = ["#E07A5F", "#3D405B", "#81B29A"]  # matches run_evolution.py's palette
+
+DONE_SUBFOLDER = "done"  # finished configs get moved to <BATCH_FOLDER>/done/ -- Path.glob("*.json")
+                          # only matches direct children, so this is all that's needed to keep a
+                          # rerun of run_batch.py over the same folder from reprocessing them
 
 if len(sys.argv) != 5:
     raise ValueError("Usage: python -m runners.run_batch <config_folder> <experiment_name> <device> <n_chains>")
@@ -172,6 +181,14 @@ def _maybe_plot_group(group_key, group_of, config_paths):
         _PLOTTED_GROUPS.add(group_key)
 
 
+def _mark_config_done(config_path):
+    """Move a just-finished config into <BATCH_FOLDER>/done/, so it's excluded from
+    any future BATCH_FOLDER.glob("*.json") -- see DONE_SUBFOLDER."""
+    done_dir = BATCH_FOLDER / DONE_SUBFOLDER
+    done_dir.mkdir(exist_ok=True)
+    shutil.move(str(config_path), str(done_dir / config_path.name))
+
+
 def _run_chain(chain_idx, chain_config_paths, config_paths, group_of):
     for config_path in chain_config_paths:
         print(f"\n{'=' * 90}\nCHAIN {chain_idx}: {config_path.name}\n{'=' * 90}\n")
@@ -181,9 +198,10 @@ def _run_chain(chain_idx, chain_config_paths, config_paths, group_of):
         group_key = group_of[config_path]
         experiment_name = EXPERIMENT_NAME if group_key == ROOT_GROUP_KEY else f"{EXPERIMENT_NAME}/{group_key}"
         subprocess.run(
-            [sys.executable, str(RUN_EVOLUTION_SCRIPT), config_name, experiment_name, DEVICE],
+            [sys.executable, str(RUN_EVOLUTION_SCRIPT), config_name, experiment_name, DEVICE, str(chain_idx)],
             check=True,
         )
+        _mark_config_done(config_path)
         _maybe_plot_group(group_key, group_of, config_paths)
 
 

@@ -17,7 +17,10 @@ _TOTAL_GENERATIONS = None
 _PRINT_INTERVAL = None
 _MAX_NETWORKS_PREVIEW = None
 _MAX_RUNS_PREVIEW = None
-_HIST_BIN_WIDTH = None
+_CHAIN_LABEL = None  # printed as "CHAIN <label>" -- identifies which run_batch.py chain (or
+                      # manual run) this process's terminal output belongs to
+_CONFIG_NAME = None  # printed in place of a bare population-size number, so the terminal
+                      # output says which config is actually running
 
 _TRACKED_GENERATIONS = []
 _TRACKED_RECORDS = []
@@ -51,18 +54,21 @@ def configure_printing(
     print_interval,
     max_networks_preview,
     max_runs_preview,
-    hist_bin_width,
+    chain_label,
+    config_name,
 ):
     """Set printing cadence and clear history buffers for a fresh run."""
     global _TOTAL_GENERATIONS, _PRINT_INTERVAL
-    global _MAX_NETWORKS_PREVIEW, _MAX_RUNS_PREVIEW, _HIST_BIN_WIDTH
+    global _MAX_NETWORKS_PREVIEW, _MAX_RUNS_PREVIEW
+    global _CHAIN_LABEL, _CONFIG_NAME
     global _TRACKED_GENERATIONS, _TRACKED_RECORDS, _REWARD_EVOLUTION, _CUE_IMPORTANCE_HISTORY
 
     _TOTAL_GENERATIONS = total_generations
     _PRINT_INTERVAL = print_interval
     _MAX_NETWORKS_PREVIEW = max_networks_preview
     _MAX_RUNS_PREVIEW = max_runs_preview
-    _HIST_BIN_WIDTH = hist_bin_width
+    _CHAIN_LABEL = chain_label
+    _CONFIG_NAME = config_name
 
     _TRACKED_GENERATIONS = []
     _TRACKED_RECORDS = []
@@ -121,32 +127,21 @@ def _format_table(headers, rows):
     return "\n".join(out)
 
 
-def _hist_bin_edges(values, bin_width):
-    min_v = float(torch.min(values).item())
-    max_v = float(torch.max(values).item())
-    start = bin_width * torch.floor(torch.tensor(min_v / bin_width)).item()
-    end = bin_width * torch.ceil(torch.tensor(max_v / bin_width)).item()
-    bins = max(1, int(round((end - start) / bin_width)))
-    return start, end, bins
-
-
-def _ascii_hist(values, bin_width, width):
-    values = values.float()
-    min_v, max_v, bins = _hist_bin_edges(values, bin_width)
-    if min_v == max_v:
-        return f"All values are {min_v:.4f}"
-
-    hist = torch.histc(values, bins=bins, min=min_v, max=max_v)
-    max_count = float(torch.max(hist).item())
-    lines = []
-    for i in range(bins):
-        left = min_v + (max_v - min_v) * (i / bins)
-        right = min_v + (max_v - min_v) * ((i + 1) / bins)
-        count = int(hist[i].item())
-        bar_len = int((count / max_count) * width)
-        bar = "#" * bar_len
-        lines.append(f"{left:8.3f}..{right:8.3f} | {bar} ({count})")
-    return "\n".join(lines)
+def _hstack_tables(tables, spacer="    "):
+    """Lay out multiple already-formatted (newline-joined) tables side by side as
+    columns instead of stacked vertically, padding shorter tables with blank space
+    so every row still lines up."""
+    split_tables = [table.split("\n") for table in tables]
+    widths = [len(lines[0]) for lines in split_tables]
+    max_rows = max(len(lines) for lines in split_tables)
+    rows = []
+    for row_idx in range(max_rows):
+        row_parts = [
+            lines[row_idx] if row_idx < len(lines) else " " * width
+            for lines, width in zip(split_tables, widths)
+        ]
+        rows.append(spacer.join(row_parts))
+    return "\n".join(rows)
 
 
 def _decision_symbol(decision, crashed, rewarded, correct_arm):
@@ -184,9 +179,6 @@ def _print_tracking_block(
     complexity_cpu,
     l1_penalty_cpu,
     regularized_fitness_cpu,
-    frob_start_cpu,
-    frob_end_cpu,
-    frob_delta_cpu,
     tracking,
 ):
     decisions = tracking["decisions_by_run"].detach().cpu()
@@ -194,17 +186,14 @@ def _print_tracking_block(
     rewarded = tracking["rewarded_by_run"].detach().cpu()
     correct_arm = tracking["correct_arm_by_run"].detach().cpu()
 
-    reward_hist = _ascii_hist(regularized_fitness_cpu, _HIST_BIN_WIDTH, 36)
-
-    start_mean = float(frob_start_cpu.mean().item())
-    end_mean = float(frob_end_cpu.mean().item())
-    delta_mean = float(frob_delta_cpu.mean().item())
-    frob_table = _format_table(
-        ["Metric", "Mean", "Min", "Max"],
+    reward_table = _format_table(
+        ["Reward metric", "Mean", "Min", "Max"],
         [
-            ("Frobenius start", f"{start_mean:.4f}", f"{float(frob_start_cpu.min().item()):.4f}", f"{float(frob_start_cpu.max().item()):.4f}"),
-            ("Frobenius end", f"{end_mean:.4f}", f"{float(frob_end_cpu.min().item()):.4f}", f"{float(frob_end_cpu.max().item()):.4f}"),
-            ("Delta end-start", f"{delta_mean:.4f}", f"{float(frob_delta_cpu.min().item()):.4f}", f"{float(frob_delta_cpu.max().item()):.4f}"),
+            ("Training reward", f"{float(training_reward_cpu.mean().item()):.4f}", f"{float(training_reward_cpu.min().item()):.4f}", f"{float(training_reward_cpu.max().item()):.4f}"),
+            ("Reward before L1", f"{float(unregularized_reward_cpu.mean().item()):.4f}", f"{float(unregularized_reward_cpu.min().item()):.4f}", f"{float(unregularized_reward_cpu.max().item()):.4f}"),
+            ("L1 complexity", f"{float(complexity_cpu.mean().item()):.4f}", f"{float(complexity_cpu.min().item()):.4f}", f"{float(complexity_cpu.max().item()):.4f}"),
+            ("L1 penalty", f"{float(l1_penalty_cpu.mean().item()):.4f}", f"{float(l1_penalty_cpu.min().item()):.4f}", f"{float(l1_penalty_cpu.max().item()):.4f}"),
+            ("Fitness after L1", f"{float(regularized_fitness_cpu.mean().item()):.4f}", f"{float(regularized_fitness_cpu.min().item()):.4f}", f"{float(regularized_fitness_cpu.max().item()):.4f}"),
         ],
     )
 
@@ -241,34 +230,11 @@ def _print_tracking_block(
 
     print()
     print("=" * 90)
-    print(f"TRACKING SNAPSHOT | generation {evaluation_idx}/{_TOTAL_GENERATIONS}")
+    print(f"CHAIN {_CHAIN_LABEL} | generation {evaluation_idx}/{_TOTAL_GENERATIONS}")
     print("=" * 90)
-    print(f"Population size: {pop}")
+    print(f"Config: {_CONFIG_NAME}")
     print()
-    print(_format_table(
-        ["Reward metric", "Mean", "Min", "Max"],
-        [
-            ("Training reward", f"{float(training_reward_cpu.mean().item()):.4f}", f"{float(training_reward_cpu.min().item()):.4f}", f"{float(training_reward_cpu.max().item()):.4f}"),
-            ("Reward before L1", f"{float(unregularized_reward_cpu.mean().item()):.4f}", f"{float(unregularized_reward_cpu.min().item()):.4f}", f"{float(unregularized_reward_cpu.max().item()):.4f}"),
-            ("L1 complexity", f"{float(complexity_cpu.mean().item()):.4f}", f"{float(complexity_cpu.min().item()):.4f}", f"{float(complexity_cpu.max().item()):.4f}"),
-            ("L1 penalty", f"{float(l1_penalty_cpu.mean().item()):.4f}", f"{float(l1_penalty_cpu.min().item()):.4f}", f"{float(l1_penalty_cpu.max().item()):.4f}"),
-            ("Fitness after L1", f"{float(regularized_fitness_cpu.mean().item()):.4f}", f"{float(regularized_fitness_cpu.min().item()):.4f}", f"{float(regularized_fitness_cpu.max().item()):.4f}"),
-        ],
-    ))
-    print()
-    print("Reward histogram:")
-    print(reward_hist)
-    print()
-    print("Weight norm summary:")
-    print(frob_table)
-    print()
-    print("Decision summary:")
-    print(decisions_table)
-    print()
-    print("Decision preview legend: x=crash before turn, Lx/Rx=crash after correct L/R turn, "
-          "lx/rx=crash after wrong L/R turn, L/R=correct turn + big reward, "
-          "l/r=wrong turn + small reward, .=no event")
-    print(decision_preview_table)
+    print(_hstack_tables([reward_table, decisions_table, decision_preview_table]))
     print("=" * 90)
     print()
 
@@ -443,7 +409,6 @@ def evaluate_generation(genome_flat, device, noise_generator, reward_generator, 
     complexity, l1_penalty = compute_l1_penalty(genome_flat, l1_lambda)
     regularized_fitness = unregularized_reward - l1_penalty
     frob_end = torch.linalg.matrix_norm(W_final, ord="fro", dim=(1, 2))
-    frob_delta = frob_end - frob_start
 
     if should_print:
         _print_tracking_block(
@@ -454,9 +419,6 @@ def evaluate_generation(genome_flat, device, noise_generator, reward_generator, 
             complexity.detach().cpu(),
             l1_penalty.detach().cpu(),
             regularized_fitness.detach().cpu(),
-            frob_start.detach().cpu(),
-            frob_end.detach().cpu(),
-            frob_delta.detach().cpu(),
             tracking,
         )
         _record_history(
@@ -476,6 +438,8 @@ def evaluate_generation(genome_flat, device, noise_generator, reward_generator, 
         )
         _record_cue_importance(evaluation_idx, context_importance, sensory_importance)
     else:
+        fit_cpu = regularized_fitness.detach().cpu()
+        print(f"CHAIN {_CHAIN_LABEL} - iter {evaluation_idx} - best: {float(fit_cpu.max()):.1f} - median: {float(fit_cpu.median()):.1f}")
         _record_history(
             evaluation_idx,
             regularized_fitness,

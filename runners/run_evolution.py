@@ -25,7 +25,6 @@ import numpy as np
 import torch
 from evotorch import Problem
 from evotorch.algorithms import PGPE
-from evotorch.logging import StdOutLogger
 
 from analysis.decision_plotting import (
     DECISION_CMAP,
@@ -53,10 +52,12 @@ from sim_core.paradigm import PHASE_REPLAY, parse_paradigm
 CONFIGS_ROOT = PROJECT_ROOT / "configs"
 DATA_ROOT = PROJECT_ROOT / "data"
 
-if len(sys.argv) != 4:
-    raise ValueError("Usage: python run_evolution.py <config_name> <experiment_name> <device>")
+if len(sys.argv) != 5:
+    raise ValueError("Usage: python run_evolution.py <config_name> <experiment_name> <device> <chain_label>")
 CONFIG_PATH = CONFIGS_ROOT / f"{sys.argv[1]}.json"
 OUTPUT_ROOT = DATA_ROOT / sys.argv[2]
+CHAIN_LABEL = sys.argv[4]  # printed as "CHAIN <label>" in terminal output -- run_batch.py passes
+                            # its chain index; a manual run can pass anything, e.g. "manual"
 with open(CONFIG_PATH, "r", encoding="utf-8") as _config_file:
     CONFIG = json.load(_config_file)
 
@@ -774,7 +775,8 @@ configure_printing(
     print_interval=TRACKED_PER_INTERVAL,
     max_networks_preview=MAX_NETWORKS_PREVIEW,
     max_runs_preview=MAX_RUNS_PREVIEW,
-    hist_bin_width=HIST_BIN_WIDTH,
+    chain_label=CHAIN_LABEL,
+    config_name=RUN_NAME,
 )
 
 problem = Problem(
@@ -796,7 +798,6 @@ searcher = PGPE(
     optimizer_config={"max_speed": MAX_SPEED, "momentum": MOMENTUM},
 )
 
-StdOutLogger(searcher)
 pgpe_history = _init_pgpe_history()
 for _ in range(NUM_GENERATIONS):
     searcher.step()
@@ -805,6 +806,3 @@ for _ in range(NUM_GENERATIONS):
 
 history = get_printing_history()
 _save_all_plots_and_results(searcher, history, pgpe_history)
-
-print("\nFinal searcher status:")
-print(searcher.status)
