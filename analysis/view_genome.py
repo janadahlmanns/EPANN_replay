@@ -18,6 +18,9 @@ import sys
 from pathlib import Path
 
 import h5py
+import matplotlib
+matplotlib.use("Agg")  # headless -- this only ever calls savefig(), never plt.show(), and a
+                        # remote GPU server reached over VPN may have no display/Tk at all
 import matplotlib.pyplot as plt
 import numpy as np
 

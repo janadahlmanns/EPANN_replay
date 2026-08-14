@@ -5,6 +5,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import matplotlib
+matplotlib.use("Agg")  # headless -- this only ever calls savefig(), never plt.show(), and a
+                        # remote GPU server reached over VPN may have no display/Tk at all
 import matplotlib.pyplot as plt
 
 

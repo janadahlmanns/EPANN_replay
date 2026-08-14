@@ -15,6 +15,9 @@ evolved/heritable genome content.
 import os
 import torch
 import numpy as np
+import matplotlib
+matplotlib.use("Agg")  # headless -- this only ever calls savefig(), never plt.show(), and a
+                        # remote GPU server reached over VPN may have no display/Tk at all
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D  # noqa: F401  (registers 3D projection)
 

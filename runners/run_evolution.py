@@ -17,6 +17,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 import evotorch
+import matplotlib
+matplotlib.use("Agg")  # headless -- this only ever calls savefig(), never plt.show(), and a
+                        # remote GPU server reached over VPN may have no display/Tk at all
 import matplotlib.pyplot as plt
 import numpy as np
 import torch

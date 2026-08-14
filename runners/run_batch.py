@@ -40,6 +40,11 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 sys.path.insert(0, str(PROJECT_ROOT))
 
+import matplotlib
+matplotlib.use("Agg")  # headless, thread-safe rendering -- facet plots are now built from inside
+                        # background chain threads (see _maybe_plot_group), and the default
+                        # interactive backend (e.g. TkAgg) isn't thread-safe, throwing spurious
+                        # "main thread is not in main loop" errors during interpreter shutdown
 import matplotlib.pyplot as plt
 import numpy as np
 
@@ -274,7 +279,10 @@ group_of = _assign_groups(config_paths)
 # can both import them for the first time at the same instant, and Windows'
 # application-control/reputation check on the never-before-seen DLLs can flake and
 # block one of the concurrent loads (seen with matplotlib's _image DLL).
-subprocess.run([sys.executable, "-c", "import matplotlib.pyplot, torch"], check=True)
+subprocess.run(
+    [sys.executable, "-c", "import matplotlib; matplotlib.use('Agg'); import matplotlib.pyplot, torch"],
+    check=True,
+)
 
 # split into RUN_IN_PARALLEL contiguous chunks, one chain per chunk
 chains = [config_paths[chain_idx::RUN_IN_PARALLEL] for chain_idx in range(RUN_IN_PARALLEL)]
