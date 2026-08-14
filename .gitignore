@@ -1,7 +1,6 @@
 .venv/
 data/
 admin/
-configs/
 .claude/
 
 __pycache__/
