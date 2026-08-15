@@ -21,7 +21,7 @@ import random
 # ==== 2. CONSTANTS / USER INPUTS ============================================
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 OUTPUT_FOLDER = PROJECT_ROOT / "configs" / "generated_sweep"
-FILENAME_PREFIX = "sweep_nocc_"   # files are named f"{FILENAME_PREFIX}{combo_slug}_{i}.json"
+FILENAME_PREFIX = "nocc_n15_"   # files are named f"{FILENAME_PREFIX}{combo_slug}_{i}.json"
 
 # Parameters to sweep -- the cartesian product of every list below becomes one
 # parameter combination (one "group" of N_CONFIGS_PER_GROUP configs). Keys must
@@ -60,7 +60,7 @@ FIXED_SEEDS = {
 # always overwritten per config (see build_config()).
 BASE_CONFIG = {
     "master_seed": None,   # overwritten per file by build_config()
-    "n_neurons": 9,
+    "n_neurons": 15,
     "noise_seed": None,
     "reward_seed": None,
     "test_seed": None,
