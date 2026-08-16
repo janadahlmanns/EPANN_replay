@@ -274,7 +274,8 @@ for phase_type, value in PARADIGM_PHASES:
             state, W, GENOME_BATCHED["M"], GENOME_BATCHED["A"], GENOME_BATCHED["B"],
             GENOME_BATCHED["C"], GENOME_BATCHED["D"], GENOME_BATCHED["beta"], GENOME_BATCHED["eta"],
             PHASE_CONTEXT[phase_type], value,
-            CONFIG["evo_context_cues_on"], CONFIG["evo_sensory_cues_on"],
+            CONFIG["evo_context_cues_on"], CONFIG["evo_sensory_cues_on"], True,  # reward cue is
+            # always on during real evolution -- see fitness.py's evaluate_generation
             noise_generator, reward_generator, DEVICE,
             recorder=recorder,
         )

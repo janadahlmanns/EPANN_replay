@@ -1,22 +1,18 @@
 """Run PGPE with tracking output and save end-of-run plots + full numeric results.
 
-Usage: python run_evolution.py <config_name> <experiment_name> <device> <chain_label> [plateau_fitness]
+Usage: python run_evolution.py <config_name> <experiment_name> <device> <chain_label>
 
 chain_label is just a display label for terminal output (run_batch.py passes its chain
 index; a manual run can pass anything, e.g. "manual").
 
-plateau_fitness (optional) is an early-exit criterion: if the population's best RAW
-reward (pre-L1 -- see sim_core/fitness.py's _check_plateau_termination for why not the
-post-L1 fitness) hits this EXACT value (not mean, not a tolerance band) for
-PLATEAU_WINDOW consecutive generations, the run stops there and saves everything
-normally, as if that were the final generation -- for the common case where a run has
-converged onto a local maximum (e.g. always exploiting one arm) that's never going to
-improve further, so finishing out the configured generation count is wasted compute.
-There's no way to derive this value from the config -- it depends on the reward/paradigm
-setup -- so it's given directly. Omit it to leave this criterion disabled. A SEPARATE,
-always-on early-exit criterion (zero left- or zero right-turns across the population on
-a detailed-print generation) needs no input and can't be disabled -- see
-sim_core/fitness.py's _print_tracking_block.
+Early-exit criterion (always on, no input needed): on a detailed-print generation
+(skipping generation 1), for EITHER task (trainA/trainB) across the whole tracked
+population, if one turn direction (or one CORRECT turn direction) never happened at
+all, the run stops there and saves everything normally, as if that were the final
+generation -- the population has collapsed onto a degenerate policy that isn't going
+to develop further, so finishing out the configured generation count is wasted
+compute. See sim_core/fitness.py's _check_event_count_termination for the exact
+conditions (and why "every run crashed" is deliberately NOT one of them).
 """
 
 # ==== 1) RNG DETERMINISM + PATH SETUP ==========================================
@@ -71,19 +67,12 @@ from sim_core.paradigm import PHASE_REPLAY, parse_paradigm
 CONFIGS_ROOT = PROJECT_ROOT / "configs"
 DATA_ROOT = PROJECT_ROOT / "data"
 
-if len(sys.argv) not in (5, 6):
-    raise ValueError(
-        "Usage: python run_evolution.py <config_name> <experiment_name> <device> <chain_label> [plateau_fitness]"
-    )
+if len(sys.argv) != 5:
+    raise ValueError("Usage: python run_evolution.py <config_name> <experiment_name> <device> <chain_label>")
 CONFIG_PATH = CONFIGS_ROOT / f"{sys.argv[1]}.json"
 OUTPUT_ROOT = DATA_ROOT / sys.argv[2]
 CHAIN_LABEL = sys.argv[4]  # printed as "CHAIN <label>" in terminal output -- run_batch.py passes
                             # its chain index; a manual run can pass anything, e.g. "manual"
-PLATEAU_FITNESS = float(sys.argv[5]) if len(sys.argv) == 6 else None  # optional: exact best raw
-                            # (pre-L1) reward value that, if hit for PLATEAU_WINDOW straight
-                            # generations, ends the run early (see sim_core/fitness.py's
-                            # _check_plateau_termination). None (the arg omitted) disables this
-                            # early-exit criterion entirely.
 with open(CONFIG_PATH, "r", encoding="utf-8") as _config_file:
     CONFIG = json.load(_config_file)
 
@@ -658,9 +647,10 @@ def _save_l1_evolution_plot(plot_dir, reward_evolution):
 
 def _save_input_weighing_plot(plot_dir, cue_importance_history):
     """Save tracked-generation line plot of ablation-based cue importance: how much
-    unregularized reward is lost when the context cue (resp. sensory cue) is clipped
-    to zero, relative to the actual evaluation condition. Near zero means the network
-    isn't using that cue at all; a large drop means it depends on it heavily."""
+    unregularized reward is lost when the context cue (resp. sensory cue, resp. the
+    online reward-input signal) is clipped to zero, relative to the actual evaluation
+    condition. Near zero means the network isn't using that cue at all; a large drop
+    means it depends on it heavily."""
     generations = np.array(cue_importance_history["generation"])
     context_mean = np.array(cue_importance_history["context_importance_mean"])
     context_min = np.array(cue_importance_history["context_importance_min"])
@@ -668,12 +658,17 @@ def _save_input_weighing_plot(plot_dir, cue_importance_history):
     sensory_mean = np.array(cue_importance_history["sensory_importance_mean"])
     sensory_min = np.array(cue_importance_history["sensory_importance_min"])
     sensory_max = np.array(cue_importance_history["sensory_importance_max"])
+    reward_mean = np.array(cue_importance_history["reward_importance_mean"])
+    reward_min = np.array(cue_importance_history["reward_importance_min"])
+    reward_max = np.array(cue_importance_history["reward_importance_max"])
 
     figure, axis = plt.subplots(nrows=1, ncols=1, figsize=(10, 6), dpi=PLOT_DPI)
     axis.plot(generations, context_mean, color=REWARD_EVOLUTION_COLORS[0], linewidth=2.0, label="context cue")
     axis.fill_between(generations, context_min, context_max, color=REWARD_EVOLUTION_COLORS[0], alpha=0.15)
     axis.plot(generations, sensory_mean, color=REWARD_EVOLUTION_COLORS[2], linewidth=2.0, label="sensory cue")
     axis.fill_between(generations, sensory_min, sensory_max, color=REWARD_EVOLUTION_COLORS[2], alpha=0.15)
+    axis.plot(generations, reward_mean, color=REWARD_EVOLUTION_COLORS[1], linewidth=2.0, label="reward signal")
+    axis.fill_between(generations, reward_min, reward_max, color=REWARD_EVOLUTION_COLORS[1], alpha=0.15)
     axis.axhline(0.0, color="#888888", linewidth=1.0, linestyle="--")
     axis.set_title("Input cue importance across tracked generations (reward lost when cue is ablated)")
     axis.set_xlabel("Generation")
@@ -803,7 +798,6 @@ configure_printing(
     max_runs_preview=MAX_RUNS_PREVIEW,
     chain_label=CHAIN_LABEL,
     config_name=RUN_NAME,
-    plateau_fitness=PLATEAU_FITNESS,
 )
 
 problem = Problem(

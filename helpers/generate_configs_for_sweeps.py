@@ -21,16 +21,16 @@ import random
 # ==== 2. CONSTANTS / USER INPUTS ============================================
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 OUTPUT_FOLDER = PROJECT_ROOT / "configs" / "generated_sweep"
-FILENAME_PREFIX = "nocc_n15_"   # files are named f"{FILENAME_PREFIX}{combo_slug}_{i}.json"
+FILENAME_PREFIX = "long_shots_"   # files are named f"{FILENAME_PREFIX}{combo_slug}_{i}.json"
 
 # Parameters to sweep -- the cartesian product of every list below becomes one
 # parameter combination (one "group" of N_CONFIGS_PER_GROUP configs). Keys must
 # match BASE_CONFIG keys; add/remove sweep params freely, this file doesn't need
 # any other changes to keep working.
 SWEEP_PARAMS = {
-    "radius_init": [25, 50, 100],
-    "search_popsize": [100, 200],
-    "stdev_learning_rate": [0.05, 0.1, 0.2, 0.5],
+    "radius_init": [50, 100, 500],
+    "search_popsize": [1000, 5000],
+    "stdev_learning_rate": [0.1],
 }
 
 N_CONFIGS_PER_GROUP = 20   # number of seeded configs generated per parameter combination

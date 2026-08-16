@@ -8,10 +8,14 @@ reset to start). The CTRNN state and weights W are NEVER reset between runs or
 maze resets -- only the maze/task bookkeeping (position, reward arm, sensory cue)
 resets. This is what makes the plasticity itself the thing being evolved.
 
-context_cues_on / sensory_cues_on: when False, the corresponding input neurons are
-clipped to zero activity every tick instead of carrying their normal cue value. The
-neurons stay in the network (same neuron count in every condition) -- they are just
-denied any signal, so evolution cannot repurpose them as free processing units.
+context_cues_on / sensory_cues_on / reward_cues_on: when False, the corresponding
+input neuron(s) are clipped to zero activity every tick instead of carrying their
+normal value. The neurons stay in the network (same neuron count in every condition)
+-- they are just denied any signal, so evolution cannot repurpose them as free
+processing units. reward_cues_on only gates what's PRESENTED to the network -- the
+underlying reward bookkeeping (recent_reward, total_reward) is computed identically
+either way, exactly like context/sensory ablation doesn't change which arm is
+actually correct, only whether the network gets to see it.
 
 Reward schedule (see constants.py "TUNABLE SIMULATION CONSTANTS" section for the full spec):
   - Crashing (choosing straight when a turn is required, or vice versa) always
@@ -108,7 +112,7 @@ def _initialize_training_phase(state, context, reward_generator, device):
 
 # ==== MAIN SIMULATION ==========================================================
 def simulate_training_phase(state, W, M, A, B, C, D, beta, eta,
-                             context, num_runs, context_cues_on, sensory_cues_on,
+                             context, num_runs, context_cues_on, sensory_cues_on, reward_cues_on,
                              noise_generator, reward_generator, device,
                              collect_tracking=False, recorder=None):
     """Runs num_runs maze runs (batched over population).
@@ -164,16 +168,17 @@ def simulate_training_phase(state, W, M, A, B, C, D, beta, eta,
         is_turn_tick = step_in_run == 4 # gives True for the turn tick and False otherwise
         is_end_tick = step_in_run == 7 # gives True for mazeend and False otherwise
 
-        # clip context/sensory neurons to zero activity when their cue is toggled off,
-        # rather than dropping the neurons, so neuron count stays fixed across conditions
+        # clip context/sensory/reward neurons to zero activity when their cue is toggled
+        # off, rather than dropping the neurons, so neuron count stays fixed across conditions
         input_context_a = context_a if context_cues_on else torch.zeros_like(context_a)
         input_context_b = context_b if context_cues_on else torch.zeros_like(context_b)
         input_sensory_a = sensory_a if sensory_cues_on else torch.zeros_like(sensory_a)
         input_sensory_b = sensory_b if sensory_cues_on else torch.zeros_like(sensory_b)
+        input_reward = recent_reward if reward_cues_on else torch.zeros_like(recent_reward)
         input_vec = torch.stack(
             [is_home, is_turn_tick.float(), is_end_tick.float(),
              input_context_a, input_context_b, input_sensory_a, input_sensory_b,
-             recent_reward], dim=1,
+             input_reward], dim=1,
         )
 
         # --- CTRNN tick: clamp inputs, advance state, apply plasticity ---

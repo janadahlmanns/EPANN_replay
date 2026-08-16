@@ -12,10 +12,6 @@ from sim_core.replay_task import assign_replay_reward, simulate_replay_phase
 # ==== 1) CONSTANTS ==============================================================
 REPLAY_REWARD_METHOD = "zero"
 PHASE_CONTEXT = {PHASE_TRAIN_A: "A", PHASE_TRAIN_B: "B"}
-PLATEAU_WINDOW = 5  # number of consecutive generations training_reward_best (best raw reward,
-                     # pre-L1) must hit _PLATEAU_FITNESS EXACTLY (not mean, not a tolerance band)
-                     # before it counts as plateaued -- see _check_plateau_termination for why
-                     # this uses the pre-L1 reward and not the post-L1 pop_best_eval
 
 _TOTAL_GENERATIONS = None
 _PRINT_INTERVAL = None
@@ -25,18 +21,13 @@ _CHAIN_LABEL = None  # printed as "CHAIN <label>" -- identifies which run_batch.
                       # manual run) this process's terminal output belongs to
 _CONFIG_NAME = None  # printed in place of a bare population-size number, so the terminal
                       # output says which config is actually running
-_PLATEAU_FITNESS = None  # optional exact raw-reward value (see configure_printing) -- if given,
-                          # PLATEAU_WINDOW consecutive generations' training_reward_best (pre-L1)
-                          # hitting it exactly triggers early termination alongside the
-                          # turn-direction check
 
-_TERMINATE_EARLY = False  # set once EITHER: (a) a detailed-print generation shows zero left- or
-                           # zero right-turns across the whole tracked population (see
-                           # _print_tracking_block) -- converged to always turning one direction,
-                           # or (b) the best raw reward plateaus exactly at _PLATEAU_FITNESS (see
-                           # _check_plateau_termination). Either way this is wasted compute that
-                           # isn't going to recover into a viable solution. run_evolution.py's main
-                           # loop checks should_terminate_early() and stops (saving everything
+_TERMINATE_EARLY = False  # set by _check_event_count_termination on a detailed-print generation
+                           # when, for EITHER task (trainA/trainB), across the WHOLE tracked
+                           # population, the search has collapsed onto a degenerate policy (see
+                           # that function for the exact conditions) -- wasted compute that isn't
+                           # going to develop into a viable solution. run_evolution.py's main loop
+                           # checks should_terminate_early() and stops (saving everything
                            # normally, as if this were the last generation).
 
 _TRACKED_GENERATIONS = []
@@ -62,6 +53,9 @@ _CUE_IMPORTANCE_HISTORY = {
     "sensory_importance_mean": [],
     "sensory_importance_min": [],
     "sensory_importance_max": [],
+    "reward_importance_mean": [],
+    "reward_importance_min": [],
+    "reward_importance_max": [],
 }
 
 
@@ -73,15 +67,11 @@ def configure_printing(
     max_runs_preview,
     chain_label,
     config_name,
-    plateau_fitness,
 ):
-    """Set printing cadence and clear history buffers for a fresh run. plateau_fitness:
-    None to disable the plateau-based early termination, or the exact fitness value to
-    watch pop_best_eval for (see _check_plateau_termination) -- always pass explicitly,
-    never omitted, so a disabled plateau check is a visible choice, not a silent default."""
+    """Set printing cadence and clear history buffers for a fresh run."""
     global _TOTAL_GENERATIONS, _PRINT_INTERVAL
     global _MAX_NETWORKS_PREVIEW, _MAX_RUNS_PREVIEW
-    global _CHAIN_LABEL, _CONFIG_NAME, _PLATEAU_FITNESS, _TERMINATE_EARLY
+    global _CHAIN_LABEL, _CONFIG_NAME, _TERMINATE_EARLY
     global _TRACKED_GENERATIONS, _TRACKED_RECORDS, _REWARD_EVOLUTION, _CUE_IMPORTANCE_HISTORY
 
     _TOTAL_GENERATIONS = total_generations
@@ -90,7 +80,6 @@ def configure_printing(
     _MAX_RUNS_PREVIEW = max_runs_preview
     _CHAIN_LABEL = chain_label
     _CONFIG_NAME = config_name
-    _PLATEAU_FITNESS = plateau_fitness
     _TERMINATE_EARLY = False
 
     _TRACKED_GENERATIONS = []
@@ -116,6 +105,9 @@ def configure_printing(
         "sensory_importance_mean": [],
         "sensory_importance_min": [],
         "sensory_importance_max": [],
+        "reward_importance_mean": [],
+        "reward_importance_min": [],
+        "reward_importance_max": [],
     }
 
 
@@ -130,9 +122,10 @@ def get_printing_history():
 
 
 def should_terminate_early():
-    """True once _print_tracking_block has flagged a converged (all-one-direction)
-    population. The caller (run_evolution.py's main loop) is responsible for actually
-    stopping -- this module only ever sets the flag, never breaks anything itself."""
+    """True once _check_event_count_termination has flagged a degenerate (collapsed)
+    population for some task. The caller (run_evolution.py's main loop) is responsible
+    for actually stopping -- this module only ever sets the flag, never breaks
+    anything itself."""
     return _TERMINATE_EARLY
 
 
@@ -200,6 +193,81 @@ def _should_print(evaluation_idx):
     return evaluation_idx % _PRINT_INTERVAL == 0
 
 
+def _task_event_tensors(tracking, paradigm_phases):
+    """{phase_type: (decisions, correct_arm)}, each tensor [pop, task_runs] --
+    tracking's tensors are [pop, total_runs], concatenated across every non-replay phase
+    IN ORDER (see _concat_tracking_segments); this slices that back apart by phase_type
+    and concatenates every occurrence of the SAME task together (a paradigm can repeat
+    trainA/trainB more than once, e.g. "trainA,20,trainB,50,trainA,20,trainB,7" -- all
+    trainA occurrences are judged as one task, not separately)."""
+    run_start = 0
+    ranges_by_task = {}
+    for phase_type, value in paradigm_phases:
+        if phase_type != PHASE_REPLAY:
+            ranges_by_task.setdefault(phase_type, []).append((run_start, run_start + value))
+        run_start += value
+
+    tensors_by_task = {}
+    for phase_type, ranges in ranges_by_task.items():
+        decisions = torch.cat([tracking["decisions_by_run"][:, start:end] for start, end in ranges], dim=1)
+        correct_arm = torch.cat([tracking["correct_arm_by_run"][:, start:end] for start, end in ranges], dim=1)
+        tensors_by_task[phase_type] = (decisions, correct_arm)
+    return tensors_by_task
+
+
+def _check_event_count_termination(evaluation_idx, tracking, paradigm_phases):
+    """Per task (trainA/trainB judged separately -- see _task_event_tensors), across
+    the WHOLE tracked population (every network, every run of that task): if ANY of
+    the following holds, the search has collapsed onto a degenerate policy that isn't
+    going to develop further, and _TERMINATE_EARLY is set.
+      - zero left turns, or zero right turns
+      - zero CORRECT left turns, or zero CORRECT right turns (only checked when that
+        direction was turned at all -- otherwise it's already covered by the point above)
+    Population-wide and per-task on purpose: looking only at the best individual (the
+    old plateau criterion) or only at counts combined across both tasks can each hide a
+    genuinely-collapsed task behind a healthy-looking aggregate -- e.g. a population
+    that always turns left (no penalties, but only half the reward available) can
+    outcompete one that's actually learning to read the cue but still crashes often.
+
+    Deliberately does NOT terminate on "every run crashed" (e.g. correctly turning but
+    then crashing right after every time) -- unlike the two turn-direction conditions
+    above, that's not one atomic behavior either happening or not: reaching mazeend
+    needs FIVE separate dead-zone ticks plus the correct turn to all hold in the same
+    run, and post-turn survival is a genuinely harder, later-arriving sub-problem than
+    pre-turn survival (the CTRNN state is never reset, so it's still recovering from
+    the excursion the turn itself just required) -- not evidence the search has
+    collapsed, just that this particular piece hasn't fallen into place yet.
+
+    Skips generation 1 entirely: initial weights are drawn small/near-zero (see
+    genome_codec.py's sample_initial_weights), so a fresh population's turn-tick output
+    is almost always inside the dead zone and crashes -- near-100% crashes at generation
+    1 is the normal starting point of every run, not a collapsed search, and firing here
+    would end runs before evolution gets any chance to act at all."""
+    global _TERMINATE_EARLY
+    if evaluation_idx == 1:
+        return
+    for phase_type, (decisions, correct_arm) in _task_event_tensors(tracking, paradigm_phases).items():
+        left_turns = decisions == 0
+        right_turns = decisions == 1
+
+        reasons = []
+        if not bool(left_turns.any().item()):
+            reasons.append("zero left turns")
+        if not bool(right_turns.any().item()):
+            reasons.append("zero right turns")
+        if bool(left_turns.any().item()) and not bool((left_turns & correct_arm).any().item()):
+            reasons.append("zero CORRECT left turns")
+        if bool(right_turns.any().item()) and not bool((right_turns & correct_arm).any().item()):
+            reasons.append("zero CORRECT right turns")
+
+        if reasons:
+            _TERMINATE_EARLY = True
+            print(f"EARLY TERMINATION: task {phase_type} at generation {evaluation_idx} -- "
+                  f"{', '.join(reasons)} -- across the whole tracked population. Collapsed onto "
+                  "a degenerate policy, not going to develop further. Stopping here as if this "
+                  "were the final generation.")
+
+
 # ==== 4) TRACKING SNAPSHOT PRINT =================================================
 def _print_tracking_block(
     evaluation_idx,
@@ -210,9 +278,8 @@ def _print_tracking_block(
     l1_penalty_cpu,
     regularized_fitness_cpu,
     tracking,
+    paradigm_phases,
 ):
-    global _TERMINATE_EARLY
-
     decisions = tracking["decisions_by_run"].detach().cpu()
     crashed = tracking["crashed_by_run"].detach().cpu()
     rewarded = tracking["rewarded_by_run"].detach().cpu()
@@ -267,42 +334,12 @@ def _print_tracking_block(
     print(f"Config: {_CONFIG_NAME}")
     print()
     print(_hstack_tables([reward_table, decisions_table, decision_preview_table]))
-    if left_turns == 0 or right_turns == 0:
-        _TERMINATE_EARLY = True
-        print(f"EARLY TERMINATION: {left_turns} left turn(s), {right_turns} right turn(s) across the "
-              "whole tracked population -- converged to turning only one direction, not going to "
-              "recover into a viable solution. Stopping here as if this were the final generation.")
+    _check_event_count_termination(evaluation_idx, tracking, paradigm_phases)
     print("=" * 90)
     print()
 
 
 # ==== 5) HISTORY WRITER =========================================================
-def _check_plateau_termination(evaluation_idx):
-    """If a plateau target was given (see configure_printing), check whether the
-    population's best RAW reward (training_reward_best -- before the L1 penalty) has
-    hit it EXACTLY (not mean, not a tolerance band) for the last PLATEAU_WINDOW
-    consecutive generations, and set _TERMINATE_EARLY if so. Deliberately compares
-    against the pre-L1 reward, not pop_best_eval (post-L1): L1 penalty is computed
-    from each individual's own genome norm, which keeps drifting slightly generation
-    to generation even once task-level behavior has genuinely converged, since PGPE
-    never stops sampling new individuals -- so pop_best_eval essentially never repeats
-    bit-exactly, while training_reward_best (a sum of fixed reward constants) does.
-    Runs every generation (unlike the turn-direction check, which only runs on
-    detailed-print generations) since training_reward_best is recorded every
-    generation regardless."""
-    global _TERMINATE_EARLY
-    if _PLATEAU_FITNESS is None:
-        return
-    recent = _REWARD_EVOLUTION["training_reward_best"][-PLATEAU_WINDOW:]
-    if len(recent) < PLATEAU_WINDOW:
-        return
-    if all(value == _PLATEAU_FITNESS for value in recent):
-        _TERMINATE_EARLY = True
-        print(f"EARLY TERMINATION: best raw reward (pre-L1) has been EXACTLY {_PLATEAU_FITNESS} for "
-              f"the last {PLATEAU_WINDOW} generations (through generation {evaluation_idx}) -- "
-              "plateaued, not going to improve further. Stopping here as if this were the final generation.")
-
-
 def _record_history(
     evaluation_idx,
     regularized_fitness,
@@ -325,7 +362,6 @@ def _record_history(
     _REWARD_EVOLUTION["training_reward_mean"].append(float(tr_cpu.mean().item()))
     _REWARD_EVOLUTION["training_reward_median"].append(float(tr_cpu.median().item()))
     _REWARD_EVOLUTION["training_reward_best"].append(float(tr_cpu.max().item()))
-    _check_plateau_termination(evaluation_idx)
     _REWARD_EVOLUTION["l1_penalty_mean"].append(float(l1_cpu.mean().item()))
     _REWARD_EVOLUTION["l1_penalty_median"].append(float(l1_cpu.median().item()))
     _REWARD_EVOLUTION["l1_penalty_best"].append(float(l1_cpu.max().item()))
@@ -352,10 +388,11 @@ def _record_history(
     )
 
 
-def _record_cue_importance(evaluation_idx, context_importance, sensory_importance):
-    """Store one tracked generation's context/sensory cue importance distribution."""
+def _record_cue_importance(evaluation_idx, context_importance, sensory_importance, reward_importance):
+    """Store one tracked generation's context/sensory/reward cue importance distribution."""
     context_cpu = context_importance.detach().cpu()
     sensory_cpu = sensory_importance.detach().cpu()
+    reward_cpu = reward_importance.detach().cpu()
     _CUE_IMPORTANCE_HISTORY["generation"].append(evaluation_idx)
     _CUE_IMPORTANCE_HISTORY["context_importance_mean"].append(float(context_cpu.mean().item()))
     _CUE_IMPORTANCE_HISTORY["context_importance_min"].append(float(context_cpu.min().item()))
@@ -363,6 +400,9 @@ def _record_cue_importance(evaluation_idx, context_importance, sensory_importanc
     _CUE_IMPORTANCE_HISTORY["sensory_importance_mean"].append(float(sensory_cpu.mean().item()))
     _CUE_IMPORTANCE_HISTORY["sensory_importance_min"].append(float(sensory_cpu.min().item()))
     _CUE_IMPORTANCE_HISTORY["sensory_importance_max"].append(float(sensory_cpu.max().item()))
+    _CUE_IMPORTANCE_HISTORY["reward_importance_mean"].append(float(reward_cpu.mean().item()))
+    _CUE_IMPORTANCE_HISTORY["reward_importance_min"].append(float(reward_cpu.min().item()))
+    _CUE_IMPORTANCE_HISTORY["reward_importance_max"].append(float(reward_cpu.max().item()))
 
 
 # ==== 6) PARADIGM EXECUTION =====================================================
@@ -373,7 +413,7 @@ def _concat_tracking_segments(segments):
 
 
 def _run_paradigm(genome, paradigm_phases, device, noise_generator, reward_generator, collect_tracking,
-                   context_cues_on, sensory_cues_on, state, W):
+                   context_cues_on, sensory_cues_on, reward_cues_on, state, W):
     """Runs every (phase_type, value) in paradigm_phases in order, starting from the
     given (state, W) and chaining CTRNN state/weights across phases. Returns the
     final (state, W) plus the summed training and replay reward. Never mutates the
@@ -389,7 +429,7 @@ def _run_paradigm(genome, paradigm_phases, device, noise_generator, reward_gener
             result = simulate_training_phase(
                 state, W, genome["M"], genome["A"], genome["B"], genome["C"], genome["D"],
                 genome["beta"], genome["eta"], PHASE_CONTEXT[phase_type], value,
-                context_cues_on, sensory_cues_on,
+                context_cues_on, sensory_cues_on, reward_cues_on,
                 noise_generator, reward_generator, device,
                 collect_tracking=collect_tracking,
             )
@@ -421,29 +461,36 @@ def _measure_cue_importance(genome, paradigm_phases, device, test_generator,
 
     Uses test_generator exclusively (never the evolutionary noise/reward
     generators), so this diagnostic draws no randomness from and has zero effect
-    on the main evolutionary RNG stream. All three probes (baseline + two
+    on the main evolutionary RNG stream. All four probes (baseline + three
     ablations) are replayed from the identical test_generator state, so they see
     the same maze draws/noise and differ only in which cue is ablated. Every
     probe's resulting state/W is discarded once its reward is read out -- nothing
     from testing carries out into the real evaluation, only the checkpoint carries in.
+
+    The reward-signal probe always ablates from a baseline with context/sensory ON --
+    the online reward input (constants.INPUT_REWARD) is never itself gated by
+    context_cues_on/sensory_cues_on, so this is the one ablation not tied to those flags.
     """
     checkpoint_rng_state = test_generator.get_state()
 
-    def _probe(probe_context_cues_on, probe_sensory_cues_on):
+    def _probe(probe_context_cues_on, probe_sensory_cues_on, probe_reward_cues_on):
         test_generator.set_state(checkpoint_rng_state)
         _, _, probe_training_reward, probe_replay_reward, _ = _run_paradigm(
             genome, paradigm_phases, device, test_generator, test_generator, False,
-            probe_context_cues_on, probe_sensory_cues_on, state_checkpoint, W_checkpoint,
+            probe_context_cues_on, probe_sensory_cues_on, probe_reward_cues_on,
+            state_checkpoint, W_checkpoint,
         )
         return probe_training_reward + probe_replay_reward
 
-    baseline_reward = _probe(context_cues_on, sensory_cues_on)
-    context_ablated_reward = _probe(False, sensory_cues_on)
-    sensory_ablated_reward = _probe(context_cues_on, False)
+    baseline_reward = _probe(context_cues_on, sensory_cues_on, True)
+    context_ablated_reward = _probe(False, sensory_cues_on, True)
+    sensory_ablated_reward = _probe(context_cues_on, False, True)
+    reward_ablated_reward = _probe(context_cues_on, sensory_cues_on, False)
 
     context_importance = baseline_reward - context_ablated_reward
     sensory_importance = baseline_reward - sensory_ablated_reward
-    return context_importance, sensory_importance
+    reward_importance = baseline_reward - reward_ablated_reward
+    return context_importance, sensory_importance, reward_importance
 
 
 # ==== 7) FITNESS EVALUATION =====================================================
@@ -466,7 +513,9 @@ def evaluate_generation(genome_flat, device, noise_generator, reward_generator, 
     state0 = torch.zeros(pop, constants.N, device=device)
     state_final, W_final, training_reward, replay_reward, tracking = _run_paradigm(
         genome, paradigm_phases, device, noise_generator, reward_generator, should_print,
-        context_cues_on, sensory_cues_on, state0, W_init,
+        context_cues_on, sensory_cues_on, True, state0, W_init,  # reward cue is always on
+        # during real evolution -- ablating it is only ever a diagnostic probe, see
+        # _measure_cue_importance, not an evolutionary condition (no evo_reward_cues_on exists)
     )
 
     unregularized_reward = training_reward + replay_reward
@@ -484,6 +533,7 @@ def evaluate_generation(genome_flat, device, noise_generator, reward_generator, 
             l1_penalty.detach().cpu(),
             regularized_fitness.detach().cpu(),
             tracking,
+            paradigm_phases,
         )
         _record_history(
             evaluation_idx,
@@ -496,11 +546,11 @@ def evaluate_generation(genome_flat, device, noise_generator, reward_generator, 
             W_final.detach().cpu(),
             tracking,
         )
-        context_importance, sensory_importance = _measure_cue_importance(
+        context_importance, sensory_importance, reward_importance = _measure_cue_importance(
             genome, paradigm_phases, device, test_generator,
             context_cues_on, sensory_cues_on, state_final, W_final,
         )
-        _record_cue_importance(evaluation_idx, context_importance, sensory_importance)
+        _record_cue_importance(evaluation_idx, context_importance, sensory_importance, reward_importance)
     else:
         fit_cpu = regularized_fitness.detach().cpu()
         print(f"CHAIN {_CHAIN_LABEL} - iter {evaluation_idx} - best: {float(fit_cpu.max()):.1f} - median: {float(fit_cpu.median()):.1f}")

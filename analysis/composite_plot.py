@@ -7,6 +7,11 @@ from whatever subfolders happen to be sitting in the given folder.
 For rebuilding those plots by hand when they're missing (a batch that crashed before
 finishing, folders moved/merged after the fact, etc.) without re-running the batch.
 
+If the given folder's own subfolders AREN'T run-output folders themselves (none of
+them match "<config_stem>_<timestamp>"), it's treated as a folder of GROUP folders
+instead: composite plots get built separately inside each of its subfolders that IS a
+run-output folder, one call standing in for however many you'd otherwise run by hand.
+
 Usage: python -m analysis.composite_plot <folder>
 """
 
@@ -50,6 +55,13 @@ def _natural_sort_key(name):
     """Sort key that orders embedded numbers by value, not by character (so
     ..._2 comes before ..._10, not after) -- matches run_batch.py's config ordering."""
     return [int(chunk) if chunk.isdigit() else chunk.lower() for chunk in re.split(r"(\d+)", name)]
+
+
+def _is_run_output_folder(folder):
+    """True if folder directly contains run_evolution.py output subfolders (any child
+    matching "<config_stem>_<YYYYMMDD-HHMMSS>") -- i.e. composite plots can be built
+    for it directly, as opposed to it being a folder OF such folders."""
+    return any(RUN_DIR_NAME_PATTERN.match(path.name) for path in folder.iterdir() if path.is_dir())
 
 
 def _find_run_dirs(top_folder):
@@ -128,6 +140,8 @@ def _draw_input_weighing_panel(axis, cue_importance, title):
     axis.fill_between(generations, cue_importance["context_importance_min"], cue_importance["context_importance_max"], color=REWARD_EVOLUTION_COLORS[0], alpha=0.15)
     axis.plot(generations, cue_importance["sensory_importance_mean"], color=REWARD_EVOLUTION_COLORS[2], linewidth=2.0, label="sensory cue")
     axis.fill_between(generations, cue_importance["sensory_importance_min"], cue_importance["sensory_importance_max"], color=REWARD_EVOLUTION_COLORS[2], alpha=0.15)
+    axis.plot(generations, cue_importance["reward_importance_mean"], color=REWARD_EVOLUTION_COLORS[1], linewidth=2.0, label="reward signal")
+    axis.fill_between(generations, cue_importance["reward_importance_min"], cue_importance["reward_importance_max"], color=REWARD_EVOLUTION_COLORS[1], alpha=0.15)
     axis.axhline(0.0, color="#888888", linewidth=1.0, linestyle="--")
     axis.set_title(title)
     axis.set_xlabel("Generation")
@@ -158,7 +172,30 @@ def _save_input_weighing_facet(config_stems, run_dirs, output_root, group_label)
 
 
 # ==== 6) MAIN EXECUTION ===========================================================
-config_stems, run_dirs = _find_run_dirs(TOP_FOLDER)
-_save_decisions_facet(config_stems, run_dirs, TOP_FOLDER, GROUP_LABEL)
-_save_input_weighing_facet(config_stems, run_dirs, TOP_FOLDER, GROUP_LABEL)
-print(f"Saved composite facet plots for {len(config_stems)} run(s) to: {TOP_FOLDER}")
+def _build_composite_plots(folder, group_label):
+    """Build both facet plots for one run-output folder."""
+    config_stems, run_dirs = _find_run_dirs(folder)
+    _save_decisions_facet(config_stems, run_dirs, folder, group_label)
+    _save_input_weighing_facet(config_stems, run_dirs, folder, group_label)
+    print(f"Saved composite facet plots for {len(config_stems)} run(s) to: {folder}")
+
+
+if _is_run_output_folder(TOP_FOLDER):
+    _build_composite_plots(TOP_FOLDER, GROUP_LABEL)
+else:
+    # TOP_FOLDER holds several GROUPS' folders (e.g. one sweep's worth), not run
+    # folders directly -- build composite plots inside each group folder in turn,
+    # skipping anything that isn't a run-output folder either rather than erroring
+    # out partway through everyone else's plots.
+    subfolders = sorted(
+        (path for path in TOP_FOLDER.iterdir() if path.is_dir()),
+        key=lambda path: _natural_sort_key(path.name),
+    )
+    if not subfolders:
+        raise ValueError(f"No subfolders found in {TOP_FOLDER}")
+
+    for subfolder in subfolders:
+        if not _is_run_output_folder(subfolder):
+            print(f"Skipping {subfolder.name} -- not a run-output folder (no '<stem>_<timestamp>' subfolders)")
+            continue
+        _build_composite_plots(subfolder, subfolder.name)

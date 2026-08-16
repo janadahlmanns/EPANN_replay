@@ -13,7 +13,7 @@ count -- a config whose stem is unique doesn't form a group on its own.
   - 0 or 1 groups found: no subfolders at all -- every run + one shared facet-plot
     pair land directly in data/<experiment_name>/, same as if nothing were grouped.
 
-Usage: python -m runners.run_batch <config_folder> <experiment_name> <device> <n_chains> <log_name> [plateau_fitness]
+Usage: python -m runners.run_batch <config_folder> <experiment_name> <device> <n_chains> <log_name>
 
 config_folder is looked up as configs/<config_folder>/ (just like batch_to_run used
 to be hardcoded) -- this is what lets different machines each point at their own
@@ -44,11 +44,6 @@ log_name picks which runtime log this invocation appends to: data/runtime_log_<l
 Dropbox) across machines, and multiple machines appending to the SAME synced file is a real
 corruption risk that a same-process lock can't protect against. Every finished config appends
 one row: config name, chain, n_chains, runtime in seconds.
-
-plateau_fitness (optional) is passed straight through to every run_evolution.py subprocess
-call, same value for every config in this batch -- makes sense for a sweep that shares one
-paradigm/reward setup (the common case). See run_evolution.py's own docstring for what it does.
-Omit it entirely to leave this early-exit criterion disabled for the whole batch.
 """
 
 # ==== 1) IMPORTS =================================================================
@@ -106,10 +101,9 @@ RUNTIME_LOG_HEADER = [
     "seconds_per_generation", "seconds_per_parallel_generation",
 ]
 
-if len(sys.argv) not in (6, 7):
+if len(sys.argv) != 6:
     raise ValueError(
-        "Usage: python -m runners.run_batch <config_folder> <experiment_name> <device> <n_chains> "
-        "<log_name> [plateau_fitness]"
+        "Usage: python -m runners.run_batch <config_folder> <experiment_name> <device> <n_chains> <log_name>"
     )
 CONFIG_FOLDER_NAME = sys.argv[1]  # looked up as configs/<CONFIG_FOLDER_NAME>/, never elsewhere
 EXPERIMENT_NAME = sys.argv[2]
@@ -117,9 +111,6 @@ DEVICE = sys.argv[3]  # passed straight through to every run_evolution.py subpro
 RUN_IN_PARALLEL = int(sys.argv[4])  # how many config chains to run concurrently -- only raise this if
                                      # you're sure the target machine's GPU has headroom for it
 LOG_NAME = sys.argv[5]  # picks data/runtime_log_<LOG_NAME>.csv -- one file per machine, see docstring
-PLATEAU_FITNESS_ARG = [sys.argv[6]] if len(sys.argv) == 7 else []  # forwarded as-is (a string) to
-                                                                     # every run_evolution.py subprocess
-                                                                     # call; omitted entirely if not given
 
 BATCH_FOLDER = PROJECT_ROOT / "configs" / CONFIG_FOLDER_NAME
 RUNTIME_LOG_PATH = DATA_ROOT / f"runtime_log_{LOG_NAME}.csv"
@@ -302,8 +293,7 @@ def _run_chain(chain_idx, chain_config_paths, config_paths, group_of):
         experiment_name = EXPERIMENT_NAME if group_key == ROOT_GROUP_KEY else f"{EXPERIMENT_NAME}/{group_key}"
         tick = time.monotonic()
         subprocess.run(
-            [sys.executable, str(RUN_EVOLUTION_SCRIPT), config_name, experiment_name, DEVICE, str(chain_idx)]
-            + PLATEAU_FITNESS_ARG,
+            [sys.executable, str(RUN_EVOLUTION_SCRIPT), config_name, experiment_name, DEVICE, str(chain_idx)],
             check=True,
         )
         runtime_seconds = time.monotonic() - tick
@@ -366,6 +356,8 @@ def _draw_input_weighing_panel(axis, cue_importance, title):
     axis.fill_between(generations, cue_importance["context_importance_min"], cue_importance["context_importance_max"], color=REWARD_EVOLUTION_COLORS[0], alpha=0.15)
     axis.plot(generations, cue_importance["sensory_importance_mean"], color=REWARD_EVOLUTION_COLORS[2], linewidth=2.0, label="sensory cue")
     axis.fill_between(generations, cue_importance["sensory_importance_min"], cue_importance["sensory_importance_max"], color=REWARD_EVOLUTION_COLORS[2], alpha=0.15)
+    axis.plot(generations, cue_importance["reward_importance_mean"], color=REWARD_EVOLUTION_COLORS[1], linewidth=2.0, label="reward signal")
+    axis.fill_between(generations, cue_importance["reward_importance_min"], cue_importance["reward_importance_max"], color=REWARD_EVOLUTION_COLORS[1], alpha=0.15)
     axis.axhline(0.0, color="#888888", linewidth=1.0, linestyle="--")
     axis.set_title(title)
     axis.set_xlabel("Generation")
