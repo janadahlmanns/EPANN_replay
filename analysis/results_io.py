@@ -15,6 +15,8 @@ File layout (see save_results_h5):
     genome/best/                   best individual of the final population + fitness
     history/reward_evolution/      per-generation reward/L1 stats (see fitness.py)
     history/cue_importance/        per-tracked-generation cue-ablation importance
+    history/transfer_metrics/      per-tracked-generation FWT/BWT (see fitness.py's
+                                    _measure_transfer_metrics)
     history/pgpe/                  per-generation PGPE center/stdev diagnostics
     history/tracked/               per-tracked-generation snapshots, stacked along
                                     a leading "tracked generation" axis
@@ -122,6 +124,7 @@ def save_results_h5(path, config, run_metadata, searcher, history, pgpe_history)
 
         _write_flat_history(h5_file.create_group("history/reward_evolution"), history["reward_evolution"])
         _write_flat_history(h5_file.create_group("history/cue_importance"), history["cue_importance_history"])
+        _write_flat_history(h5_file.create_group("history/transfer_metrics"), history["transfer_metrics_history"])
         _write_flat_history(h5_file.create_group("history/pgpe"), pgpe_history)
         _write_tracked_records(
             h5_file.create_group("history/tracked"),

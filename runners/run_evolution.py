@@ -1,18 +1,24 @@
 """Run PGPE with tracking output and save end-of-run plots + full numeric results.
 
-Usage: python run_evolution.py <config_name> <experiment_name> <device> <chain_label>
+Usage: python run_evolution.py <config_name> <experiment_name> <device> <chain_label> <early_termination_enabled>
 
 chain_label is just a display label for terminal output (run_batch.py passes its chain
 index; a manual run can pass anything, e.g. "manual").
 
-Early-exit criterion (always on, no input needed): on a detailed-print generation
-(skipping generation 1), for EITHER task (trainA/trainB) across the whole tracked
-population, if one turn direction (or one CORRECT turn direction) never happened at
-all, the run stops there and saves everything normally, as if that were the final
+early_termination_enabled is exactly "True" or "False" (fails loudly on anything else --
+argv values are always strings, so this project's style forbids silently guessing what a
+different value would mean). When "True" (the normal case): on a detailed-print
+generation (skipping generation 1), for EITHER task (trainA/trainB) across the whole
+tracked population, if one turn direction (or one CORRECT turn direction) never happened
+at all, the run stops there and saves everything normally, as if that were the final
 generation -- the population has collapsed onto a degenerate policy that isn't going
 to develop further, so finishing out the configured generation count is wasted
 compute. See sim_core/fitness.py's _check_event_count_termination for the exact
-conditions (and why "every run crashed" is deliberately NOT one of them).
+conditions (and why "every run crashed" is deliberately NOT one of them). When "False":
+the same criterion is still detected and printed every time it's met, but the run is
+never actually stopped early -- it always runs the full configured generation count --
+for deliberately forcing a run past what looks like a collapsed population, e.g. to see
+whether it recovers given more generations.
 """
 
 # ==== 1) RNG DETERMINISM + PATH SETUP ==========================================
@@ -51,10 +57,11 @@ from analysis.decision_plotting import (
     grid_dims,
     sort_by_fitness,
 )
+from analysis.csv_export import write_csv
 from analysis.results_io import results_filename, save_results_h5
 from sim_core import constants, genome_codec
 from sim_core.constants import INPUT_SENSORY_A, INPUT_SENSORY_B
-from sim_core.fitness import configure_printing, fitness_function, get_printing_history, should_terminate_early
+from sim_core.fitness import PHASE_CONTEXT, configure_printing, fitness_function, get_printing_history, should_terminate_early
 from sim_core.paradigm import PHASE_REPLAY, parse_paradigm
 
 # ==== 2) CONFIG LOADING + OUTPUT LOCATION =======================================
@@ -67,12 +74,28 @@ from sim_core.paradigm import PHASE_REPLAY, parse_paradigm
 CONFIGS_ROOT = PROJECT_ROOT / "configs"
 DATA_ROOT = PROJECT_ROOT / "data"
 
-if len(sys.argv) != 5:
-    raise ValueError("Usage: python run_evolution.py <config_name> <experiment_name> <device> <chain_label>")
+
+def _parse_bool_arg(value, arg_name):
+    """Strict True/False CLI-argument parser -- argv values are always strings, and this
+    project's style forbids silently guessing (e.g. treating any non-"False" string as
+    True), so anything other than exactly "True" or "False" fails loudly."""
+    if value == "True":
+        return True
+    if value == "False":
+        return False
+    raise ValueError(f"{arg_name} must be exactly 'True' or 'False', got {value!r}")
+
+
+if len(sys.argv) != 6:
+    raise ValueError(
+        "Usage: python run_evolution.py <config_name> <experiment_name> <device> <chain_label> "
+        "<early_termination_enabled: True/False>"
+    )
 CONFIG_PATH = CONFIGS_ROOT / f"{sys.argv[1]}.json"
 OUTPUT_ROOT = DATA_ROOT / sys.argv[2]
 CHAIN_LABEL = sys.argv[4]  # printed as "CHAIN <label>" in terminal output -- run_batch.py passes
                             # its chain index; a manual run can pass anything, e.g. "manual"
+EARLY_TERMINATION_ENABLED = _parse_bool_arg(sys.argv[5], "early_termination_enabled")
 with open(CONFIG_PATH, "r", encoding="utf-8") as _config_file:
     CONFIG = json.load(_config_file)
 
@@ -106,6 +129,25 @@ PARADIGM_PHASES = parse_paradigm(PARADIGM)
 # ordered list of (phase_type, num_runs) for training phases only, replay skipped --
 # this must stay in the same order fitness.py concatenates tracking segments in
 TRAINING_PHASE_LAYOUT = [(phase_type, value) for phase_type, value in PARADIGM_PHASES if phase_type != PHASE_REPLAY]
+
+# FWT/BWT (see sim_core/fitness.py's _measure_transfer_metrics) generalize to however
+# many DISTINCT training tasks this paradigm actually has (T >= 2, in whatever order the
+# paradigm trains them) -- today T is always 2, but nothing here (or in fitness.py) needs
+# touching if a future paradigm adds a third task, e.g. a double-T-maze -- only
+# paradigm.py's VALID_PHASE_TYPES and fitness.py's PHASE_CONTEXT need to learn the new
+# task type exists at all. Fail loudly here, at config-load time, if the paradigm has
+# fewer than two distinct training tasks or repeats one -- rather than only discovering
+# it once fitness.py's own identical check fires mid-evolution. TASK_ORDER_LABELS (e.g.
+# ["A", "B"] or, one day, ["A", "B", "C"]) reflects this run's ACTUAL paradigm order, so
+# plot/CSV labels are always correct regardless of task count or order.
+_TRAINING_TASK_TYPES = [phase_type for phase_type, _ in TRAINING_PHASE_LAYOUT]
+if len(_TRAINING_TASK_TYPES) < 2 or len(set(_TRAINING_TASK_TYPES)) != len(_TRAINING_TASK_TYPES):
+    raise ValueError(
+        "Forward/backward transfer metrics (see sim_core/fitness.py's _measure_transfer_metrics) "
+        f"need at least two DISTINCT training tasks, each appearing exactly once; got "
+        f"{TRAINING_PHASE_LAYOUT} from paradigm {PARADIGM!r}."
+    )
+TASK_ORDER_LABELS = [PHASE_CONTEXT[phase_type] for phase_type in _TRAINING_TASK_TYPES]
 
 NUM_GENERATIONS = CONFIG["num_generations"]
 SEARCH_POPSIZE = CONFIG["search_popsize"]
@@ -155,8 +197,26 @@ SENSORY_CUE_FILENAME = "sensory_cues.png"
 TRAINING_REWARD_FILENAME = "training_reward_evolution.png"
 L1_EVOLUTION_FILENAME = "l1_evolution.png"
 INPUT_WEIGHING_FILENAME = "input_weighing.png"
+TRANSFER_METRICS_FILENAME = "transfer_metrics.png"
 PGPE_PARAMS_FILENAME = "pgpe_params.png"
 PGPE_FITNESS_FILENAME = "pgpe_fitness.png"
+
+# One CSV companion per PNG above (same stem, ".csv" instead of ".png") -- holds
+# exactly the already-wrangled data that PNG was drawn from, see analysis/csv_export.py.
+DECISIONS_CSV_FILENAME = "decisions.csv"
+ALL_DECISIONS_CSV_FILENAME = "all_decisions.csv"
+EVENT_COUNTS_CSV_FILENAME = "event_counts.csv"
+REWARD_HIST_CSV_FILENAME = "reward_hist.csv"
+FROBENIUS_CSV_FILENAME = "frobenius.csv"
+WEIGHT_DISTRIBUTION_CSV_FILENAME = "weight_distribution.csv"
+REWARD_EVOLUTION_CSV_FILENAME = "reward_evolution.csv"
+SENSORY_CUE_CSV_FILENAME = "sensory_cues.csv"
+TRAINING_REWARD_CSV_FILENAME = "training_reward_evolution.csv"
+L1_EVOLUTION_CSV_FILENAME = "l1_evolution.csv"
+INPUT_WEIGHING_CSV_FILENAME = "input_weighing.csv"
+TRANSFER_METRICS_CSV_FILENAME = "transfer_metrics.csv"
+PGPE_PARAMS_CSV_FILENAME = "pgpe_params.csv"
+PGPE_FITNESS_CSV_FILENAME = "pgpe_fitness.csv"
 REWARD_EVOLUTION_COLORS = ["#E07A5F", "#3D405B", "#81B29A"]
 PALETTE_COLORS = ["#E07A5F", "#3D405B", "#81B29A", "#F2CC8F", "#F4F1DE"]
 WEIGHT_HIST_BINS = 80
@@ -290,6 +350,13 @@ def _save_pgpe_params_plot(plot_dir, pgpe_history):
     figure.savefig(_prefixed_path(plot_dir, PGPE_PARAMS_FILENAME))
     plt.close(figure)
 
+    write_csv(_prefixed_path(plot_dir, PGPE_PARAMS_CSV_FILENAME), _columns_to_rows({
+        "generation": generations,
+        "center_norm": center_norm,
+        "stdev_mean": stdev_mean, "stdev_min": stdev_min, "stdev_max": stdev_max,
+        "stdev_sensory_mean": stdev_sensory_mean, "stdev_sensory_min": stdev_sensory_min, "stdev_sensory_max": stdev_sensory_max,
+    }))
+
 
 def _save_pgpe_fitness_plot(plot_dir, pgpe_history):
     generations = np.array(pgpe_history["generation"])
@@ -316,11 +383,25 @@ def _save_pgpe_fitness_plot(plot_dir, pgpe_history):
     figure.savefig(_prefixed_path(plot_dir, PGPE_FITNESS_FILENAME))
     plt.close(figure)
 
+    write_csv(_prefixed_path(plot_dir, PGPE_FITNESS_CSV_FILENAME), _columns_to_rows({
+        "generation": generations, "fitness_mean": fitness_mean, "fitness_max": fitness_max, "fitness_std": fitness_std,
+    }))
+
 
 # ==== 4) PLOTTING HELPERS ======================================================
 def _prefixed_path(plot_dir, filename):
     """Prefix every saved figure's filename with RUN_NAME, e.g. 'decisions.png' -> 'NAME_decisions.png'."""
     return plot_dir / f"{RUN_NAME}_{filename}"
+
+
+def _columns_to_rows(columns):
+    """columns: dict of column_name -> equal-length sequence (first column is normally
+    "generation"). Returns one dict (row) per index, column order matching insertion
+    order -- for the many per-generation line plots below whose CSV is just their
+    plotted line(s) transposed into rows."""
+    names = list(columns.keys())
+    length = len(columns[names[0]])
+    return [{name: columns[name][i] for name in names} for i in range(length)]
 
 
 def _generation_colors(tracked_generations):
@@ -354,6 +435,24 @@ def _record_decision_matrix(record):
     )
 
 
+def _decision_rows(generation, matrix):
+    """Long-format rows for one generation's fitness-sorted decision matrix ([network_rank,
+    run_index] category codes): one row per cell, network_rank 0 = best fitness."""
+    rows = []
+    n_networks, n_runs = matrix.shape
+    for rank in range(n_networks):
+        for run_index in range(n_runs):
+            code = int(matrix[rank, run_index])
+            rows.append({
+                "generation": generation,
+                "network_rank": rank,
+                "run_index": run_index,
+                "category_code": code,
+                "category_label": DECISION_LABELS[code],
+            })
+    return rows
+
+
 def _save_decisions_plot(plot_dir, tracked_records):
     """Save side-by-side heatmaps for first and last tracked generations, sorted by fitness."""
     first_matrix = _record_decision_matrix(_record_sorted_by_fitness(tracked_records[0]))
@@ -376,6 +475,12 @@ def _save_decisions_plot(plot_dir, tracked_records):
     # approach _save_all_decisions_plot below already uses for the same reason)
     figure.savefig(_prefixed_path(plot_dir, DECISIONS_FILENAME), bbox_inches="tight")
     plt.close(figure)
+
+    rows = (
+        _decision_rows(tracked_records[0]["generation"], first_matrix)
+        + _decision_rows(tracked_records[-1]["generation"], last_matrix)
+    )
+    write_csv(_prefixed_path(plot_dir, DECISIONS_CSV_FILENAME), rows)
 
 
 def _save_all_decisions_plot(plot_dir, tracked_records, tracked_generations):
@@ -403,6 +508,7 @@ def _save_all_decisions_plot(plot_dir, tracked_records, tracked_generations):
     )
 
     im_ref = None
+    csv_rows = []
     for idx, record in enumerate(tracked_records):
         row, col = divmod(idx, n_cols)
         matrix = _record_decision_matrix(_record_sorted_by_fitness(record))
@@ -414,6 +520,7 @@ def _save_all_decisions_plot(plot_dir, tracked_records, tracked_generations):
         ax.tick_params(labelsize=fs_axis - 1)
         if im_ref is None:
             im_ref = im
+        csv_rows.extend(_decision_rows(tracked_generations[idx], matrix))
 
     # hide unused slots in the last row
     for spare in range(n_plots, n_rows * n_cols):
@@ -427,6 +534,8 @@ def _save_all_decisions_plot(plot_dir, tracked_records, tracked_generations):
     figure.suptitle("Decisions: all tracked generations (sorted by fitness)", fontsize=fs_title + 2, y=1.0)
     figure.savefig(_prefixed_path(plot_dir, ALL_DECISIONS_FILENAME), bbox_inches="tight")
     plt.close(figure)
+
+    write_csv(_prefixed_path(plot_dir, ALL_DECISIONS_CSV_FILENAME), csv_rows)
 
 
 def _save_event_counts_plot(plot_dir, tracked_records, tracked_generations, colors):
@@ -455,6 +564,7 @@ def _save_event_counts_plot(plot_dir, tracked_records, tracked_generations, colo
     group_width = 0.8
     bar_width = group_width / n_events
     x_base = np.arange(n_gens)
+    csv_rows = []
 
     for row_idx, (phase_type, seg_start, seg_end) in enumerate(phase_run_ranges):
         axis = axes[row_idx, 0]
@@ -469,6 +579,18 @@ def _save_event_counts_plot(plot_dir, tracked_records, tracked_generations, colo
         # sum to 100% regardless of how many runs actually completed.
         totals = counts.sum(axis=1, keepdims=True)
         percentages = np.divide(counts, totals, out=np.zeros_like(counts, dtype=float), where=totals != 0) * 100.0
+
+        for g_idx in range(n_gens):
+            for e_idx in range(n_events):
+                csv_rows.append({
+                    "phase_type": phase_type,
+                    "run_range_start": seg_start,
+                    "run_range_end": seg_end - 1,
+                    "generation": tracked_generations[g_idx],
+                    "event_label": event_labels[e_idx],
+                    "count": int(counts[g_idx, e_idx]),
+                    "percentage_of_generation_events": percentages[g_idx, e_idx],
+                })
 
         for e_idx in range(n_events):
             offset = (e_idx - (n_events - 1) / 2) * bar_width
@@ -491,6 +613,8 @@ def _save_event_counts_plot(plot_dir, tracked_records, tracked_generations, colo
     figure.savefig(_prefixed_path(plot_dir, EVENT_COUNTS_FILENAME))
     plt.close(figure)
 
+    write_csv(_prefixed_path(plot_dir, EVENT_COUNTS_CSV_FILENAME), csv_rows)
+
 
 def _save_reward_hist_plot(plot_dir, tracked_records, tracked_generations, colors):
     """Save overlapping line histograms for tracked-generation fitness distributions."""
@@ -504,9 +628,16 @@ def _save_reward_hist_plot(plot_dir, tracked_records, tracked_generations, color
     bin_edges = np.arange(start, end + HIST_BIN_WIDTH, HIST_BIN_WIDTH)
     x_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
 
+    csv_rows = []
     for idx, record in enumerate(tracked_records):
         counts, _ = np.histogram(record["fitness"].numpy(), bins=bin_edges, density=True)
         axis.plot(x_centers, counts, color=colors[idx], linewidth=2.0, label=f"gen {tracked_generations[idx]}")
+        for bin_center, density in zip(x_centers, counts):
+            csv_rows.append({
+                "generation": tracked_generations[idx],
+                "fitness_bin_center": bin_center,
+                "density": density,
+            })
 
     axis.set_title("Fitness distribution across tracked generations")
     axis.set_xlabel("Fitness")
@@ -517,35 +648,49 @@ def _save_reward_hist_plot(plot_dir, tracked_records, tracked_generations, color
     figure.savefig(_prefixed_path(plot_dir, REWARD_HIST_FILENAME))
     plt.close(figure)
 
+    write_csv(_prefixed_path(plot_dir, REWARD_HIST_CSV_FILENAME), csv_rows)
 
-def _plot_frob_panel(axis, tracked_records, tracked_generations, colors, key, panel_title):
-    """Draw overlapping Frobenius traces for one panel."""
+
+def _plot_frob_panel(axis, tracked_records, tracked_generations, colors, key, panel_title, stage_label):
+    """Draw overlapping Frobenius traces for one panel. Returns this panel's CSV rows
+    (stage_label distinguishes "start" vs "end" once combined with the other panel)."""
+    csv_rows = []
     for idx, record in enumerate(tracked_records):
         values = np.sort(record[key].numpy())
         x = np.arange(values.shape[0])
 
         axis.plot(x, values, color=colors[idx], linewidth=1.2, alpha=0.9, label=f"gen {tracked_generations[idx]}")
+        for sorted_index, value in zip(x, values):
+            csv_rows.append({
+                "generation": tracked_generations[idx],
+                "stage": stage_label,
+                "sorted_index": int(sorted_index),
+                "frobenius_norm": value,
+            })
 
     axis.set_title(panel_title)
     axis.set_xlabel("Network index (sorted)")
     axis.set_ylabel("Frobenius norm")
     axis.grid(True, alpha=0.2)
+    return csv_rows
 
 
 def _save_frobenius_plot(plot_dir, tracked_records, tracked_generations, colors):
     """Save side-by-side Frobenius plots for start and end weight norms."""
     figure, axes = plt.subplots(nrows=1, ncols=2, figsize=(16, 6), dpi=PLOT_DPI)
-    _plot_frob_panel(axes[0], tracked_records, tracked_generations, colors, "frob_start", "Starting weights")
-    _plot_frob_panel(axes[1], tracked_records, tracked_generations, colors, "frob_end", "End-of-eval weights")
+    csv_rows = _plot_frob_panel(axes[0], tracked_records, tracked_generations, colors, "frob_start", "Starting weights", "start")
+    csv_rows += _plot_frob_panel(axes[1], tracked_records, tracked_generations, colors, "frob_end", "End-of-eval weights", "end")
     axes[1].legend()
     figure.suptitle("Frobenius norm evolution across tracked generations")
     figure.tight_layout()
     figure.savefig(_prefixed_path(plot_dir, FROBENIUS_FILENAME))
     plt.close(figure)
 
+    write_csv(_prefixed_path(plot_dir, FROBENIUS_CSV_FILENAME), csv_rows)
 
-def _plot_weight_distribution_panel(axis, tracked_records, tracked_generations, colors, key, panel_title):
-    """Draw overlapping line histograms for raw weight values."""
+
+def _plot_weight_distribution_panel(axis, tracked_records, tracked_generations, colors, key, panel_title, stage_label):
+    """Draw overlapping line histograms for raw weight values. Returns this panel's CSV rows."""
     all_values = [record[key].numpy().reshape(-1) for record in tracked_records]
     global_min = min(values.min() for values in all_values)
     global_max = max(values.max() for values in all_values)
@@ -556,30 +701,41 @@ def _plot_weight_distribution_panel(axis, tracked_records, tracked_generations, 
     bin_edges = np.linspace(global_min, global_max, WEIGHT_HIST_BINS + 1)
     x_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
 
+    csv_rows = []
     for idx, values in enumerate(all_values):
         counts, _ = np.histogram(values, bins=bin_edges, density=True)
         axis.plot(x_centers, counts, color=colors[idx], linewidth=1.6, alpha=0.9, label=f"gen {tracked_generations[idx]}")
+        for bin_center, density in zip(x_centers, counts):
+            csv_rows.append({
+                "generation": tracked_generations[idx],
+                "stage": stage_label,
+                "weight_bin_center": bin_center,
+                "density": density,
+            })
 
     axis.set_title(panel_title)
     axis.set_xlabel("Weight value")
     axis.set_ylabel("Distribution density")
     axis.grid(True, alpha=0.2)
+    return csv_rows
 
 
 def _save_weight_distribution_plot(plot_dir, tracked_records, tracked_generations, colors):
     """Save side-by-side line histograms for start and end weight distributions."""
     figure, axes = plt.subplots(nrows=1, ncols=2, figsize=(16, 6), dpi=PLOT_DPI)
-    _plot_weight_distribution_panel(
-        axes[0], tracked_records, tracked_generations, colors, "weights_start", "Starting weights"
+    csv_rows = _plot_weight_distribution_panel(
+        axes[0], tracked_records, tracked_generations, colors, "weights_start", "Starting weights", "start"
     )
-    _plot_weight_distribution_panel(
-        axes[1], tracked_records, tracked_generations, colors, "weights_end", "End-of-eval weights"
+    csv_rows += _plot_weight_distribution_panel(
+        axes[1], tracked_records, tracked_generations, colors, "weights_end", "End-of-eval weights", "end"
     )
     axes[1].legend()
     figure.suptitle("Weight-value distributions across tracked generations")
     figure.tight_layout()
     figure.savefig(_prefixed_path(plot_dir, WEIGHT_DISTRIBUTION_FILENAME))
     plt.close(figure)
+
+    write_csv(_prefixed_path(plot_dir, WEIGHT_DISTRIBUTION_CSV_FILENAME), csv_rows)
 
 
 def _save_reward_evolution_plot(plot_dir, reward_evolution):
@@ -602,6 +758,10 @@ def _save_reward_evolution_plot(plot_dir, reward_evolution):
     figure.savefig(_prefixed_path(plot_dir, REWARD_EVOLUTION_FILENAME))
     plt.close(figure)
 
+    write_csv(_prefixed_path(plot_dir, REWARD_EVOLUTION_CSV_FILENAME), _columns_to_rows({
+        "generation": generations, "mean_eval": mean_eval, "median_eval": median_eval, "pop_best_eval": pop_best_eval,
+    }))
+
 
 def _save_training_reward_evolution_plot(plot_dir, reward_evolution):
     """Save all-generation line plot for mean, median, and best training reward (summed across all paradigm training phases, pre-L1)."""
@@ -623,6 +783,10 @@ def _save_training_reward_evolution_plot(plot_dir, reward_evolution):
     figure.savefig(_prefixed_path(plot_dir, TRAINING_REWARD_FILENAME))
     plt.close(figure)
 
+    write_csv(_prefixed_path(plot_dir, TRAINING_REWARD_CSV_FILENAME), _columns_to_rows({
+        "generation": generations, "mean_training_reward": mean_tr, "median_training_reward": median_tr, "best_training_reward": best_tr,
+    }))
+
 
 def _save_l1_evolution_plot(plot_dir, reward_evolution):
     """Save all-generation line plot for mean, median, and max L1 penalty."""
@@ -643,6 +807,10 @@ def _save_l1_evolution_plot(plot_dir, reward_evolution):
     figure.tight_layout()
     figure.savefig(_prefixed_path(plot_dir, L1_EVOLUTION_FILENAME))
     plt.close(figure)
+
+    write_csv(_prefixed_path(plot_dir, L1_EVOLUTION_CSV_FILENAME), _columns_to_rows({
+        "generation": generations, "mean_l1_penalty": mean_l1, "median_l1_penalty": median_l1, "max_l1_penalty": max_l1,
+    }))
 
 
 def _save_input_weighing_plot(plot_dir, cue_importance_history):
@@ -679,6 +847,13 @@ def _save_input_weighing_plot(plot_dir, cue_importance_history):
     figure.savefig(_prefixed_path(plot_dir, INPUT_WEIGHING_FILENAME))
     plt.close(figure)
 
+    write_csv(_prefixed_path(plot_dir, INPUT_WEIGHING_CSV_FILENAME), _columns_to_rows({
+        "generation": generations,
+        "context_importance_mean": context_mean, "context_importance_min": context_min, "context_importance_max": context_max,
+        "sensory_importance_mean": sensory_mean, "sensory_importance_min": sensory_min, "sensory_importance_max": sensory_max,
+        "reward_importance_mean": reward_mean, "reward_importance_min": reward_min, "reward_importance_max": reward_max,
+    }))
+
 
 def _save_sensory_cue_plot(plot_dir, tracked_records):
     """Save side-by-side bar charts of sensory cue distribution for first and last tracked generation."""
@@ -687,6 +862,7 @@ def _save_sensory_cue_plot(plot_dir, tracked_records):
 
     figure, axes = plt.subplots(nrows=1, ncols=2, figsize=(10, 5), dpi=PLOT_DPI, sharey=True)
 
+    csv_rows = []
     for axis, record, title_suffix in (
         (axes[0], first_record, f"Generation {first_record['generation']}"),
         (axes[1], last_record, f"Generation {last_record['generation']}"),
@@ -712,12 +888,75 @@ def _save_sensory_cue_plot(plot_dir, tracked_records):
                 va="bottom",
                 fontsize=9,
             )
+        for cue_label, count, pct in zip(cue_labels, counts, percentages):
+            csv_rows.append({
+                "generation": record["generation"],
+                "cue_label": cue_label,
+                "count": int(count),
+                "percentage_of_runs": pct,
+            })
 
     axes[0].set_ylabel("Percentage of runs (%)")
     figure.suptitle("Sensory cue distribution across maze runs")
     figure.tight_layout()
     figure.savefig(_prefixed_path(plot_dir, SENSORY_CUE_FILENAME))
     plt.close(figure)
+
+    write_csv(_prefixed_path(plot_dir, SENSORY_CUE_CSV_FILENAME), csv_rows)
+
+
+def _save_transfer_metrics_plot(plot_dir, transfer_metrics_history):
+    """Save tracked-generation FWT/BWT plot -- Lopez-Paz & Ranzato (2017) "Gradient
+    Episodic Memory for Continual Learning", Eqs. 3-4, generalized to however many
+    distinct training tasks THIS paradigm actually has (see sim_core/fitness.py's
+    _measure_transfer_metrics; TASK_ORDER_LABELS, module-level, reflects this run's
+    actual paradigm order/count -- e.g. ["A","B"] or, once a third task exists,
+    ["A","B","C"] -- so titles/columns are correct regardless of task count or order).
+    Both metrics are already averaged over however many task-pair terms T-1 produces
+    (T = len(TASK_ORDER_LABELS)), matching the paper's single reported FWT/BWT number
+    per model -- so the plot itself never grows with T, only the CSV's traceability
+    columns do (one _mean column per underlying R_i,i / R_T,i / R_i-1,i / b_i probe --
+    see transfer_metrics_history's dynamically-named keys)."""
+    generations = np.array(transfer_metrics_history["generation"])
+    fwt_mean = np.array(transfer_metrics_history["fwt_mean"])
+    fwt_min = np.array(transfer_metrics_history["fwt_min"])
+    fwt_max = np.array(transfer_metrics_history["fwt_max"])
+    bwt_mean = np.array(transfer_metrics_history["bwt_mean"])
+    bwt_min = np.array(transfer_metrics_history["bwt_min"])
+    bwt_max = np.array(transfer_metrics_history["bwt_max"])
+    task_chain = " -> ".join(TASK_ORDER_LABELS)
+
+    figure, axes = plt.subplots(nrows=1, ncols=2, figsize=(16, 6), dpi=PLOT_DPI)
+    axes[0].plot(generations, fwt_mean, color=REWARD_EVOLUTION_COLORS[0], linewidth=2.0)
+    axes[0].fill_between(generations, fwt_min, fwt_max, color=REWARD_EVOLUTION_COLORS[0], alpha=0.15)
+    axes[0].axhline(0.0, color="#888888", linewidth=1.0, linestyle="--")
+    axes[0].set_title(f"Forward transfer (mean over consecutive pairs): {task_chain}")
+    axes[0].set_xlabel("Generation")
+    axes[0].set_ylabel("FWT (reward/run)")
+    axes[0].grid(True, alpha=0.2)
+
+    axes[1].plot(generations, bwt_mean, color=REWARD_EVOLUTION_COLORS[1], linewidth=2.0)
+    axes[1].fill_between(generations, bwt_min, bwt_max, color=REWARD_EVOLUTION_COLORS[1], alpha=0.15)
+    axes[1].axhline(0.0, color="#888888", linewidth=1.0, linestyle="--")
+    axes[1].set_title(f"Backward transfer (mean over first {len(TASK_ORDER_LABELS) - 1} task(s)): {task_chain}, after all trained")
+    axes[1].set_xlabel("Generation")
+    axes[1].set_ylabel("BWT (reward/run)")
+    axes[1].grid(True, alpha=0.2)
+
+    figure.suptitle("Forward/backward knowledge transfer (Lopez-Paz & Ranzato 2017) across tracked generations")
+    figure.tight_layout()
+    figure.savefig(_prefixed_path(plot_dir, TRANSFER_METRICS_FILENAME))
+    plt.close(figure)
+
+    n_gens = len(generations)
+    base_keys = ("generation", "fwt_mean", "fwt_min", "fwt_max", "bwt_mean", "bwt_min", "bwt_max")
+    component_keys = sorted(key for key in transfer_metrics_history if key not in base_keys)
+    csv_columns = {"generation": generations, "task_order": [task_chain] * n_gens}
+    for key in base_keys[1:]:
+        csv_columns[key] = np.array(transfer_metrics_history[key])
+    for key in component_keys:
+        csv_columns[key] = np.array(transfer_metrics_history[key])
+    write_csv(_prefixed_path(plot_dir, TRANSFER_METRICS_CSV_FILENAME), _columns_to_rows(csv_columns))
 
 
 def _save_all_plots_and_results(searcher, history, pgpe_history):
@@ -731,6 +970,7 @@ def _save_all_plots_and_results(searcher, history, pgpe_history):
     tracked_records = history["tracked_records"]
     reward_evolution = history["reward_evolution"]
     cue_importance_history = history["cue_importance_history"]
+    transfer_metrics_history = history["transfer_metrics_history"]
     colors = _generation_colors(tracked_generations)
 
     _save_decisions_plot(RUN_DIR, tracked_records)
@@ -743,6 +983,7 @@ def _save_all_plots_and_results(searcher, history, pgpe_history):
     _save_training_reward_evolution_plot(RUN_DIR, reward_evolution)
     _save_l1_evolution_plot(RUN_DIR, reward_evolution)
     _save_input_weighing_plot(RUN_DIR, cue_importance_history)
+    _save_transfer_metrics_plot(RUN_DIR, transfer_metrics_history)
     _save_sensory_cue_plot(RUN_DIR, tracked_records)
     _save_pgpe_params_plot(RUN_DIR, pgpe_history)
     _save_pgpe_fitness_plot(RUN_DIR, pgpe_history)
@@ -798,6 +1039,7 @@ configure_printing(
     max_runs_preview=MAX_RUNS_PREVIEW,
     chain_label=CHAIN_LABEL,
     config_name=RUN_NAME,
+    early_termination_enabled=EARLY_TERMINATION_ENABLED,
 )
 
 problem = Problem(

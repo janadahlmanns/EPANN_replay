@@ -13,7 +13,7 @@ count -- a config whose stem is unique doesn't form a group on its own.
   - 0 or 1 groups found: no subfolders at all -- every run + one shared facet-plot
     pair land directly in data/<experiment_name>/, same as if nothing were grouped.
 
-Usage: python -m runners.run_batch <config_folder> <experiment_name> <device> <n_chains> <log_name>
+Usage: python -m runners.run_batch <config_folder> <experiment_name> <device> <n_chains> <log_name> <early_termination_enabled>
 
 config_folder is looked up as configs/<config_folder>/ (just like batch_to_run used
 to be hardcoded) -- this is what lets different machines each point at their own
@@ -25,6 +25,13 @@ headroom for it -- e.g. running 2 side by side on a machine with two GPUs.
 
 device is passed straight through to each run_evolution.py subprocess call
 (overriding any "device" field in the config json -- see run_evolution.py).
+
+early_termination_enabled is exactly "True" or "False" (fails loudly on anything else),
+passed straight through to every run_evolution.py subprocess call -- see that script's
+docstring/sim_core/fitness.py's _check_event_count_termination for what it controls.
+"False" forces every config in this batch to run its full configured generation count
+regardless of the early-termination criterion, e.g. to see whether a run that would
+normally look collapsed actually recovers given more generations.
 
 Each config is moved into <config_folder>/done/ the moment its run_evolution.py
 subprocess finishes successfully -- so config_folder always reflects what's still
@@ -101,9 +108,21 @@ RUNTIME_LOG_HEADER = [
     "seconds_per_generation", "seconds_per_parallel_generation",
 ]
 
-if len(sys.argv) != 6:
+def _parse_bool_arg(value, arg_name):
+    """Strict True/False CLI-argument parser -- argv values are always strings, and this
+    project's style forbids silently guessing (e.g. treating any non-"False" string as
+    True), so anything other than exactly "True" or "False" fails loudly."""
+    if value == "True":
+        return True
+    if value == "False":
+        return False
+    raise ValueError(f"{arg_name} must be exactly 'True' or 'False', got {value!r}")
+
+
+if len(sys.argv) != 7:
     raise ValueError(
-        "Usage: python -m runners.run_batch <config_folder> <experiment_name> <device> <n_chains> <log_name>"
+        "Usage: python -m runners.run_batch <config_folder> <experiment_name> <device> <n_chains> "
+        "<log_name> <early_termination_enabled: True/False>"
     )
 CONFIG_FOLDER_NAME = sys.argv[1]  # looked up as configs/<CONFIG_FOLDER_NAME>/, never elsewhere
 EXPERIMENT_NAME = sys.argv[2]
@@ -111,6 +130,8 @@ DEVICE = sys.argv[3]  # passed straight through to every run_evolution.py subpro
 RUN_IN_PARALLEL = int(sys.argv[4])  # how many config chains to run concurrently -- only raise this if
                                      # you're sure the target machine's GPU has headroom for it
 LOG_NAME = sys.argv[5]  # picks data/runtime_log_<LOG_NAME>.csv -- one file per machine, see docstring
+EARLY_TERMINATION_ENABLED = _parse_bool_arg(sys.argv[6], "early_termination_enabled")  # passed straight
+                                     # through to every run_evolution.py subprocess call, see docstring
 
 BATCH_FOLDER = PROJECT_ROOT / "configs" / CONFIG_FOLDER_NAME
 RUNTIME_LOG_PATH = DATA_ROOT / f"runtime_log_{LOG_NAME}.csv"
@@ -293,7 +314,10 @@ def _run_chain(chain_idx, chain_config_paths, config_paths, group_of):
         experiment_name = EXPERIMENT_NAME if group_key == ROOT_GROUP_KEY else f"{EXPERIMENT_NAME}/{group_key}"
         tick = time.monotonic()
         subprocess.run(
-            [sys.executable, str(RUN_EVOLUTION_SCRIPT), config_name, experiment_name, DEVICE, str(chain_idx)],
+            [
+                sys.executable, str(RUN_EVOLUTION_SCRIPT), config_name, experiment_name, DEVICE, str(chain_idx),
+                str(EARLY_TERMINATION_ENABLED),
+            ],
             check=True,
         )
         runtime_seconds = time.monotonic() - tick
