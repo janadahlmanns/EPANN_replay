@@ -1,18 +1,24 @@
 """Run PGPE with tracking output and save end-of-run plots + full numeric results.
 
-Usage: python run_evolution.py <config_name> <experiment_name> <device> <chain_label>
+Usage: python run_evolution.py <config_name> <experiment_name> <device> <chain_label> <early_termination_enabled>
 
 chain_label is just a display label for terminal output (run_batch.py passes its chain
 index; a manual run can pass anything, e.g. "manual").
 
-Early-exit criterion (always on, no input needed): on a detailed-print generation
-(skipping generation 1), for EITHER task (trainA/trainB) across the whole tracked
-population, if one turn direction (or one CORRECT turn direction) never happened at
-all, the run stops there and saves everything normally, as if that were the final
+early_termination_enabled is exactly "True" or "False" (fails loudly on anything else --
+argv values are always strings, so this project's style forbids silently guessing what a
+different value would mean). When "True" (the normal case): on a detailed-print
+generation (skipping generation 1), for EITHER task (trainA/trainB) across the whole
+tracked population, if one turn direction (or one CORRECT turn direction) never happened
+at all, the run stops there and saves everything normally, as if that were the final
 generation -- the population has collapsed onto a degenerate policy that isn't going
 to develop further, so finishing out the configured generation count is wasted
 compute. See sim_core/fitness.py's _check_event_count_termination for the exact
-conditions (and why "every run crashed" is deliberately NOT one of them).
+conditions (and why "every run crashed" is deliberately NOT one of them). When "False":
+the same criterion is still detected and printed every time it's met, but the run is
+never actually stopped early -- it always runs the full configured generation count --
+for deliberately forcing a run past what looks like a collapsed population, e.g. to see
+whether it recovers given more generations.
 """
 
 # ==== 1) RNG DETERMINISM + PATH SETUP ==========================================
@@ -68,12 +74,28 @@ from sim_core.paradigm import PHASE_REPLAY, parse_paradigm
 CONFIGS_ROOT = PROJECT_ROOT / "configs"
 DATA_ROOT = PROJECT_ROOT / "data"
 
-if len(sys.argv) != 5:
-    raise ValueError("Usage: python run_evolution.py <config_name> <experiment_name> <device> <chain_label>")
+
+def _parse_bool_arg(value, arg_name):
+    """Strict True/False CLI-argument parser -- argv values are always strings, and this
+    project's style forbids silently guessing (e.g. treating any non-"False" string as
+    True), so anything other than exactly "True" or "False" fails loudly."""
+    if value == "True":
+        return True
+    if value == "False":
+        return False
+    raise ValueError(f"{arg_name} must be exactly 'True' or 'False', got {value!r}")
+
+
+if len(sys.argv) != 6:
+    raise ValueError(
+        "Usage: python run_evolution.py <config_name> <experiment_name> <device> <chain_label> "
+        "<early_termination_enabled: True/False>"
+    )
 CONFIG_PATH = CONFIGS_ROOT / f"{sys.argv[1]}.json"
 OUTPUT_ROOT = DATA_ROOT / sys.argv[2]
 CHAIN_LABEL = sys.argv[4]  # printed as "CHAIN <label>" in terminal output -- run_batch.py passes
                             # its chain index; a manual run can pass anything, e.g. "manual"
+EARLY_TERMINATION_ENABLED = _parse_bool_arg(sys.argv[5], "early_termination_enabled")
 with open(CONFIG_PATH, "r", encoding="utf-8") as _config_file:
     CONFIG = json.load(_config_file)
 
@@ -1017,6 +1039,7 @@ configure_printing(
     max_runs_preview=MAX_RUNS_PREVIEW,
     chain_label=CHAIN_LABEL,
     config_name=RUN_NAME,
+    early_termination_enabled=EARLY_TERMINATION_ENABLED,
 )
 
 problem = Problem(

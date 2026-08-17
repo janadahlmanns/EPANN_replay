@@ -186,7 +186,7 @@ def simulate_training_phase(state, W, M, A, B, C, D, beta, eta,
         new_state = activation_step(state, W, beta, constants.NOISE_STD, noise_generator)
         dW = plasticity_step(state, W, M, A, B, C, D, eta)
         W = W + dW
-        W = W / W.abs().amax(dim=(1, 2), keepdim=True).clamp(min=1e-8)
+        # W = W / W.abs().amax(dim=(1, 2), keepdim=True).clamp(min=1e-8)
         new_state[:, :N_INPUT] = input_vec
         output = new_state[:, OUTPUT_IDX]
 

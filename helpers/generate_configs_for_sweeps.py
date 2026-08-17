@@ -28,12 +28,12 @@ FILENAME_PREFIX = "test_"   # files are named f"{FILENAME_PREFIX}{combo_slug}_{i
 # match BASE_CONFIG keys; add/remove sweep params freely, this file doesn't need
 # any other changes to keep working.
 SWEEP_PARAMS = {
-    "radius_init": [50],
-    "search_popsize": [500],
+    "radius_init": [400],
+    "search_popsize": [10000],
     "stdev_learning_rate": [0.1],
 }
 
-N_CONFIGS_PER_GROUP = 20   # number of seeded configs generated per parameter combination
+N_CONFIGS_PER_GROUP = 200   # number of seeded configs generated per parameter combination
 
 # ---- seeds: same 5 seed types as generate_configs.py. One list per type is
 # generated per SEED_MODE below, each of length

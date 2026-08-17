@@ -21,6 +21,11 @@ _CHAIN_LABEL = None  # printed as "CHAIN <label>" -- identifies which run_batch.
                       # manual run) this process's terminal output belongs to
 _CONFIG_NAME = None  # printed in place of a bare population-size number, so the terminal
                       # output says which config is actually running
+_EARLY_TERMINATION_ENABLED = None  # from run_evolution.py's CLI (early_termination_enabled) --
+                                    # when False, _check_event_count_termination still detects and
+                                    # prints a met criterion every time, but never sets
+                                    # _TERMINATE_EARLY, so the run always goes the full configured
+                                    # generation count regardless of a seemingly-collapsed population
 
 _TERMINATE_EARLY = False  # set by _check_event_count_termination on a detailed-print generation
                            # when, for EITHER task (trainA/trainB), across the WHOLE tracked
@@ -28,7 +33,8 @@ _TERMINATE_EARLY = False  # set by _check_event_count_termination on a detailed-
                            # that function for the exact conditions) -- wasted compute that isn't
                            # going to develop into a viable solution. run_evolution.py's main loop
                            # checks should_terminate_early() and stops (saving everything
-                           # normally, as if this were the last generation).
+                           # normally, as if this were the last generation). Never set at all when
+                           # _EARLY_TERMINATION_ENABLED is False -- see that flag's comment.
 
 _TRACKED_GENERATIONS = []
 _TRACKED_RECORDS = []
@@ -82,11 +88,12 @@ def configure_printing(
     max_runs_preview,
     chain_label,
     config_name,
+    early_termination_enabled,
 ):
     """Set printing cadence and clear history buffers for a fresh run."""
     global _TOTAL_GENERATIONS, _PRINT_INTERVAL
     global _MAX_NETWORKS_PREVIEW, _MAX_RUNS_PREVIEW
-    global _CHAIN_LABEL, _CONFIG_NAME, _TERMINATE_EARLY
+    global _CHAIN_LABEL, _CONFIG_NAME, _EARLY_TERMINATION_ENABLED, _TERMINATE_EARLY
     global _TRACKED_GENERATIONS, _TRACKED_RECORDS, _REWARD_EVOLUTION
     global _CUE_IMPORTANCE_HISTORY, _TRANSFER_METRICS_HISTORY
 
@@ -96,6 +103,7 @@ def configure_printing(
     _MAX_RUNS_PREVIEW = max_runs_preview
     _CHAIN_LABEL = chain_label
     _CONFIG_NAME = config_name
+    _EARLY_TERMINATION_ENABLED = early_termination_enabled
     _TERMINATE_EARLY = False
 
     _TRACKED_GENERATIONS = []
@@ -270,7 +278,15 @@ def _check_event_count_termination(evaluation_idx, tracking, paradigm_phases):
     genome_codec.py's sample_initial_weights), so a fresh population's turn-tick output
     is almost always inside the dead zone and crashes -- near-100% crashes at generation
     1 is the normal starting point of every run, not a collapsed search, and firing here
-    would end runs before evolution gets any chance to act at all."""
+    would end runs before evolution gets any chance to act at all.
+
+    _EARLY_TERMINATION_ENABLED (from run_evolution.py's CLI, via configure_printing) gates
+    whether a met criterion actually halts the run: when False, the criterion below is
+    still detected and printed every time it's met -- so a stuck-looking run is still
+    visible in the terminal log -- but _TERMINATE_EARLY is never set, so
+    run_evolution.py's main loop always runs the full configured generation count
+    regardless. For deliberately forcing a run past what would normally look like a
+    collapsed population, e.g. to see whether it recovers given more generations."""
     global _TERMINATE_EARLY
     if evaluation_idx == 1:
         return
@@ -288,12 +304,20 @@ def _check_event_count_termination(evaluation_idx, tracking, paradigm_phases):
         if bool(right_turns.any().item()) and not bool((right_turns & correct_arm).any().item()):
             reasons.append("zero CORRECT right turns")
 
-        if reasons:
+        if not reasons:
+            continue
+
+        if _EARLY_TERMINATION_ENABLED:
             _TERMINATE_EARLY = True
             print(f"EARLY TERMINATION: task {phase_type} at generation {evaluation_idx} -- "
                   f"{', '.join(reasons)} -- across the whole tracked population. Collapsed onto "
                   "a degenerate policy, not going to develop further. Stopping here as if this "
                   "were the final generation.")
+        else:
+            print(f"EARLY TERMINATION CRITERION MET (disabled, continuing): task {phase_type} at "
+                  f"generation {evaluation_idx} -- {', '.join(reasons)} -- across the whole tracked "
+                  "population. Would normally stop here, but early termination is disabled -- "
+                  "running the full configured generation count regardless.")
 
 
 # ==== 4) TRACKING SNAPSHOT PRINT =================================================
