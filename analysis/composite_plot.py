@@ -26,6 +26,7 @@ matplotlib.use("Agg")  # headless -- this only ever calls savefig(), never plt.s
 import matplotlib.pyplot as plt
 import numpy as np
 
+from analysis.csv_export import write_csv
 from analysis.decision_plotting import (
     DECISION_LABELS,
     N_DECISION_CATEGORIES,
@@ -40,6 +41,8 @@ from analysis.results_io import load_results_h5, results_filename
 PLOT_DPI = 180
 DECISIONS_FACET_FILENAME = "final_generation_decisions_facet.png"
 INPUT_WEIGHING_FACET_FILENAME = "input_weighing_facet.png"
+DECISIONS_FACET_CSV_FILENAME = "final_generation_decisions_facet.csv"
+INPUT_WEIGHING_FACET_CSV_FILENAME = "input_weighing_facet.csv"
 REWARD_EVOLUTION_COLORS = ["#E07A5F", "#3D405B", "#81B29A"]  # matches run_evolution.py's palette
 
 RUN_DIR_NAME_PATTERN = re.compile(r"^(.*)_(\d{8}-\d{6})$")  # "<config_stem>_<YYYYMMDD-HHMMSS>"
@@ -100,6 +103,7 @@ def _save_decisions_facet(config_stems, run_dirs, output_root, group_label):
     grid = figure.add_gridspec(nrows=n_rows + 1, ncols=n_cols, height_ratios=[6.0] * n_rows + [0.7], hspace=0.45, wspace=0.18)
 
     im_ref = None
+    csv_rows = []
     for idx, (stem, run_dir) in enumerate(zip(config_stems, run_dirs)):
         tracked = load_results_h5(run_dir / results_filename(stem))["history"]["tracked"]
         generation = int(tracked["generation"][-1])
@@ -118,6 +122,19 @@ def _save_decisions_facet(config_stems, run_dirs, output_root, group_label):
         if im_ref is None:
             im_ref = im
 
+        n_networks, n_runs = matrix.shape
+        for rank in range(n_networks):
+            for run_index in range(n_runs):
+                code = int(matrix[rank, run_index])
+                csv_rows.append({
+                    "config_stem": stem,
+                    "generation": generation,
+                    "network_rank": rank,
+                    "run_index": run_index,
+                    "category_code": code,
+                    "category_label": DECISION_LABELS[code],
+                })
+
     for spare in range(n_panels, n_rows * n_cols):
         row, col = divmod(spare, n_cols)
         figure.add_subplot(grid[row, col]).set_visible(False)
@@ -130,6 +147,8 @@ def _save_decisions_facet(config_stems, run_dirs, output_root, group_label):
     # doesn't support the colorbar's gridspec-placed Axes and warns every run
     figure.savefig(output_root / DECISIONS_FACET_FILENAME, bbox_inches="tight")
     plt.close(figure)
+
+    write_csv(output_root / DECISIONS_FACET_CSV_FILENAME, csv_rows)
 
 
 # ==== 5) CROSS-CONFIG FACET: INPUT CUE IMPORTANCE ================================
@@ -155,10 +174,26 @@ def _save_input_weighing_facet(config_stems, run_dirs, output_root, group_label)
     n_rows, n_cols = grid_dims(n_panels)
 
     figure, axes = plt.subplots(nrows=n_rows, ncols=n_cols, figsize=(8.0 * n_cols, 5.0 * n_rows), dpi=PLOT_DPI, squeeze=False)
+    csv_rows = []
     for idx, (stem, run_dir) in enumerate(zip(config_stems, run_dirs)):
         cue_importance = load_results_h5(run_dir / results_filename(stem))["history"]["cue_importance"]
         row, col = divmod(idx, n_cols)
         _draw_input_weighing_panel(axes[row, col], cue_importance, stem)
+
+        for i, generation in enumerate(cue_importance["generation"]):
+            csv_rows.append({
+                "config_stem": stem,
+                "generation": int(generation),
+                "context_importance_mean": cue_importance["context_importance_mean"][i],
+                "context_importance_min": cue_importance["context_importance_min"][i],
+                "context_importance_max": cue_importance["context_importance_max"][i],
+                "sensory_importance_mean": cue_importance["sensory_importance_mean"][i],
+                "sensory_importance_min": cue_importance["sensory_importance_min"][i],
+                "sensory_importance_max": cue_importance["sensory_importance_max"][i],
+                "reward_importance_mean": cue_importance["reward_importance_mean"][i],
+                "reward_importance_min": cue_importance["reward_importance_min"][i],
+                "reward_importance_max": cue_importance["reward_importance_max"][i],
+            })
 
     for spare in range(n_panels, n_rows * n_cols):
         row, col = divmod(spare, n_cols)
@@ -169,6 +204,8 @@ def _save_input_weighing_facet(config_stems, run_dirs, output_root, group_label)
     figure.tight_layout()
     figure.savefig(output_root / INPUT_WEIGHING_FACET_FILENAME)
     plt.close(figure)
+
+    write_csv(output_root / INPUT_WEIGHING_FACET_CSV_FILENAME, csv_rows)
 
 
 # ==== 6) MAIN EXECUTION ===========================================================

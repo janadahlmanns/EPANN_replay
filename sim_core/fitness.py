@@ -57,6 +57,21 @@ _CUE_IMPORTANCE_HISTORY = {
     "reward_importance_min": [],
     "reward_importance_max": [],
 }
+_TRANSFER_METRICS_HISTORY = {
+    "generation": [],
+    "fwt_mean": [],
+    "fwt_min": [],
+    "fwt_max": [],
+    "bwt_mean": [],
+    "bwt_min": [],
+    "bwt_max": [],
+    # Per-component traceability columns (R_<label>_own, baseline_<label>, etc. -- see
+    # _measure_transfer_metrics's docstring) are NOT listed here: this project's task
+    # count T is read from the paradigm, so the component set's size/names vary with T
+    # (2 tasks -> 4 components, 3 tasks -> 7, ...). _record_transfer_metrics adds them
+    # to this dict the first time it sees them (generation 1, always tracked -- see
+    # _should_print), so every tracked generation ends up with the same key set.
+}
 
 
 # ==== 2) PUBLIC CONTROL + HISTORY ACCESS =======================================
@@ -72,7 +87,8 @@ def configure_printing(
     global _TOTAL_GENERATIONS, _PRINT_INTERVAL
     global _MAX_NETWORKS_PREVIEW, _MAX_RUNS_PREVIEW
     global _CHAIN_LABEL, _CONFIG_NAME, _TERMINATE_EARLY
-    global _TRACKED_GENERATIONS, _TRACKED_RECORDS, _REWARD_EVOLUTION, _CUE_IMPORTANCE_HISTORY
+    global _TRACKED_GENERATIONS, _TRACKED_RECORDS, _REWARD_EVOLUTION
+    global _CUE_IMPORTANCE_HISTORY, _TRANSFER_METRICS_HISTORY
 
     _TOTAL_GENERATIONS = total_generations
     _PRINT_INTERVAL = print_interval
@@ -109,6 +125,17 @@ def configure_printing(
         "reward_importance_min": [],
         "reward_importance_max": [],
     }
+    _TRANSFER_METRICS_HISTORY = {
+        "generation": [],
+        "fwt_mean": [],
+        "fwt_min": [],
+        "fwt_max": [],
+        "bwt_mean": [],
+        "bwt_min": [],
+        "bwt_max": [],
+        # per-component traceability columns added dynamically -- see module-level
+        # _TRANSFER_METRICS_HISTORY's comment and _record_transfer_metrics
+    }
 
 
 def get_printing_history():
@@ -118,6 +145,7 @@ def get_printing_history():
         "tracked_records": _TRACKED_RECORDS,
         "reward_evolution": _REWARD_EVOLUTION,
         "cue_importance_history": _CUE_IMPORTANCE_HISTORY,
+        "transfer_metrics_history": _TRANSFER_METRICS_HISTORY,
     }
 
 
@@ -405,6 +433,28 @@ def _record_cue_importance(evaluation_idx, context_importance, sensory_importanc
     _CUE_IMPORTANCE_HISTORY["reward_importance_max"].append(float(reward_cpu.max().item()))
 
 
+def _record_transfer_metrics(evaluation_idx, metrics):
+    """Store one tracked generation's FWT/BWT distribution (population-wide mean/min/max)
+    plus each underlying R-component's population mean, for CSV traceability -- see
+    _measure_transfer_metrics for what each component means. The component key set's
+    size/names depend on this run's task count T (fixed for the whole run, since the
+    paradigm doesn't change generation to generation) -- new keys are added to
+    _TRANSFER_METRICS_HISTORY the first time they're seen (generation 1, always tracked),
+    so every tracked generation ends up with the same key set with no gaps."""
+    fwt_cpu = metrics["fwt"].detach().cpu()
+    bwt_cpu = metrics["bwt"].detach().cpu()
+    _TRANSFER_METRICS_HISTORY["generation"].append(evaluation_idx)
+    _TRANSFER_METRICS_HISTORY["fwt_mean"].append(float(fwt_cpu.mean().item()))
+    _TRANSFER_METRICS_HISTORY["fwt_min"].append(float(fwt_cpu.min().item()))
+    _TRANSFER_METRICS_HISTORY["fwt_max"].append(float(fwt_cpu.max().item()))
+    _TRANSFER_METRICS_HISTORY["bwt_mean"].append(float(bwt_cpu.mean().item()))
+    _TRANSFER_METRICS_HISTORY["bwt_min"].append(float(bwt_cpu.min().item()))
+    _TRANSFER_METRICS_HISTORY["bwt_max"].append(float(bwt_cpu.max().item()))
+    for label, tensor in metrics["components"].items():
+        key = f"{label}_mean"
+        _TRANSFER_METRICS_HISTORY.setdefault(key, []).append(float(tensor.detach().cpu().mean().item()))
+
+
 # ==== 6) PARADIGM EXECUTION =====================================================
 def _concat_tracking_segments(segments):
     """Concatenate per-training-phase tracking dicts along the run axis (dim=1),
@@ -416,13 +466,21 @@ def _run_paradigm(genome, paradigm_phases, device, noise_generator, reward_gener
                    context_cues_on, sensory_cues_on, reward_cues_on, state, W):
     """Runs every (phase_type, value) in paradigm_phases in order, starting from the
     given (state, W) and chaining CTRNN state/weights across phases. Returns the
-    final (state, W) plus the summed training and replay reward. Never mutates the
-    state/W tensors passed in -- simulate_training_phase/simulate_replay_phase both
-    clone-or-recompute rather than mutate in place -- so the same (state, W) can
-    safely be reused as a starting checkpoint across multiple independent calls."""
+    final (state, W), the summed training and replay reward, per-training-task-type
+    reward (training_reward_by_task -- occurrences of the same task type, e.g. two
+    separate trainA phases, are summed together, same convention as fitness.py's
+    _task_event_tensors), and checkpoint_after_task -- a {phase_type: (state, W)} dict
+    capturing the checkpoint right when EACH distinct training phase type finishes (first
+    occurrence only), used by _measure_transfer_metrics for its zero-shot probes; empty
+    if paradigm_phases has no training phase at all. Never mutates the state/W tensors
+    passed in -- simulate_training_phase/simulate_replay_phase both clone-or-recompute
+    rather than mutate in place -- so the same (state, W) can safely be reused as a
+    starting checkpoint across multiple independent calls."""
     training_reward = torch.zeros(state.shape[0], device=device)
     replay_reward = torch.zeros(state.shape[0], device=device)
     tracking_segments = []
+    training_reward_by_task = {}
+    checkpoint_after_task = {}
 
     for phase_type, value in paradigm_phases:
         if phase_type in PHASE_CONTEXT:
@@ -439,6 +497,11 @@ def _run_paradigm(genome, paradigm_phases, device, noise_generator, reward_gener
             else:
                 state, W, phase_reward = result
             training_reward = training_reward + phase_reward
+            training_reward_by_task[phase_type] = training_reward_by_task.get(
+                phase_type, torch.zeros_like(phase_reward)
+            ) + phase_reward
+            if phase_type not in checkpoint_after_task:
+                checkpoint_after_task[phase_type] = (state.clone(), W.clone())
         elif phase_type == PHASE_REPLAY:
             state, W, replay_trace = simulate_replay_phase(
                 state, W, genome["M"], genome["A"], genome["B"], genome["C"], genome["D"],
@@ -449,7 +512,7 @@ def _run_paradigm(genome, paradigm_phases, device, noise_generator, reward_gener
             raise ValueError(f"Unknown phase type '{phase_type}' in paradigm.")
 
     tracking = _concat_tracking_segments(tracking_segments) if collect_tracking else None
-    return state, W, training_reward, replay_reward, tracking
+    return state, W, training_reward, replay_reward, tracking, training_reward_by_task, checkpoint_after_task
 
 
 def _measure_cue_importance(genome, paradigm_phases, device, test_generator,
@@ -475,7 +538,7 @@ def _measure_cue_importance(genome, paradigm_phases, device, test_generator,
 
     def _probe(probe_context_cues_on, probe_sensory_cues_on, probe_reward_cues_on):
         test_generator.set_state(checkpoint_rng_state)
-        _, _, probe_training_reward, probe_replay_reward, _ = _run_paradigm(
+        _, _, probe_training_reward, probe_replay_reward, _, _, _ = _run_paradigm(
             genome, paradigm_phases, device, test_generator, test_generator, False,
             probe_context_cues_on, probe_sensory_cues_on, probe_reward_cues_on,
             state_checkpoint, W_checkpoint,
@@ -491,6 +554,111 @@ def _measure_cue_importance(genome, paradigm_phases, device, test_generator,
     sensory_importance = baseline_reward - sensory_ablated_reward
     reward_importance = baseline_reward - reward_ablated_reward
     return context_importance, sensory_importance, reward_importance
+
+
+def _training_task_order(paradigm_phases):
+    """Ordered list of (task_type, num_runs), one entry per DISTINCT training task in
+    paradigm_phases, in chronological order of occurrence -- e.g. [("trainA", 50),
+    ("trainB", 50)] or, once a third task type exists (e.g. a double-T-maze), [("trainA",
+    ...), ("trainB", ...), ("trainC", ...)]. FWT/BWT (_measure_transfer_metrics) are
+    defined for any task count T >= 2 (see Lopez-Paz & Ranzato 2017's R in R^{T x T});
+    T is read from the paradigm every call, never hardcoded, so a third training task
+    added to paradigm.py's VALID_PHASE_TYPES/this module's PHASE_CONTEXT needs no other
+    change here or downstream (recording/h5/plot/CSV all adapt automatically).
+
+    Assumes each distinct task appears exactly once (repeats aren't supported by this
+    metric yet) and that there are at least two distinct tasks -- raises loudly rather
+    than silently computing something meaningless otherwise (a single-task paradigm has
+    no transfer to measure; a repeated task's checkpoints would be ambiguous)."""
+    training_phases = [(phase_type, value) for phase_type, value in paradigm_phases if phase_type in PHASE_CONTEXT]
+    task_types = [phase_type for phase_type, _ in training_phases]
+    if len(task_types) < 2 or len(set(task_types)) != len(task_types):
+        raise ValueError(
+            "FWT/BWT transfer metrics (see project-plan point 6.2, Lopez-Paz & Ranzato 2017) "
+            "need at least two DISTINCT training tasks, each appearing exactly once in the "
+            f"paradigm; got training phases {training_phases} from paradigm {paradigm_phases}."
+        )
+    return training_phases
+
+
+def _measure_transfer_metrics(genome, device, test_generator, context_cues_on, sensory_cues_on,
+                               state0, W_init, checkpoint_after_task, state_final, W_final,
+                               task_order, training_reward_by_task):
+    """Forward/backward knowledge transfer, exactly as defined in Lopez-Paz, D., & Ranzato,
+    M. (2017), "Gradient Episodic Memory for Continual Learning" (NeurIPS 2017), Section 2,
+    Equations 3-4, generalized to however many distinct training tasks this paradigm
+    actually has (T = len(task_order) >= 2 -- see _training_task_order). Task order is
+    read from the paradigm itself, NOT hardcoded to any particular sequence, so an
+    A-then-B, B-then-A, or (future) A-then-B-then-C paradigm all report correctly.
+
+    Paper's matrix: R_i,j = test performance on task j after observing the last sample of
+    task i; b-bar_j = performance on task j at random initialization. Our "performance" is
+    mean maze-task reward per run (see project-plan 6.1: performance is reward collected
+    only, never the L1-/replay-adjusted evolutionary fitness). This project's paradigm
+    trains each distinct task exactly once, in the fixed chronological order task_order,
+    so "checkpoint after task i" (i = 1..T, in that chronological order) is unambiguous:
+
+        R_i,i   = task i performance, measured right after task i is trained (the real
+                  run's own segment reward for that task -- training_reward_by_task, no
+                  extra probe needed)
+        R_T,i   (i = 1..T-1) = task i performance measured after ALL T tasks are trained
+                  -- a final-test probe from state_final/W_final
+        R_i-1,i (i = 2..T)   = task i performance measured right after task (i-1) is
+                  trained, BEFORE task i has been trained at all -- a zero-shot probe
+                  from checkpoint_after_task[task (i-1)]
+        b_i     (i = 1..T)   = task i performance at random initialization (state0/
+                  W_init) -- baseline probe
+
+        BWT = (1/(T-1)) * sum_{i=1}^{T-1} (R_T,i - R_i,i)    (paper Eq. 3)
+        FWT = (1/(T-1)) * sum_{i=2}^{T}   (R_i-1,i - b_i)    (paper Eq. 4)
+
+    Every probe runs through test_generator only (never the evolutionary noise/reward
+    generators), exactly like _measure_cue_importance -- they read the network's state
+    but leave no trace on the real evaluation. collect_tracking=False: only the scalar
+    reward is needed, not per-run decision tracking.
+
+    Returns {"bwt": tensor, "fwt": tensor, "components": {label: tensor}}. "components"
+    holds every underlying R_i,i / R_T,i / R_i-1,i / b_i probe, keyed by a name built
+    from this run's actual task labels (e.g. "R_A_own", "baseline_B", "R_A_then_B_zero_
+    shot") -- purely for CSV/h5 traceability, and naturally sized to however many terms
+    T-1 and T actually produce (2 tasks -> 4 components, 3 tasks -> 7, ...).
+    """
+    def _probe(phase_type, num_runs, state, W):
+        _, _, probe_training_reward, _, _, _, _ = _run_paradigm(
+            genome, [(phase_type, num_runs)], device, test_generator, test_generator, False,
+            context_cues_on, sensory_cues_on, True, state, W,
+        )
+        return probe_training_reward / num_runs
+
+    num_tasks = len(task_order)
+    labels = [PHASE_CONTEXT[task_type] for task_type, _ in task_order]
+    components = {}
+
+    r_diag = {}
+    baseline = {}
+    for (task_type, num_runs), label in zip(task_order, labels):
+        r_diag[task_type] = training_reward_by_task[task_type] / num_runs
+        components[f"R_{label}_own"] = r_diag[task_type]
+        baseline[task_type] = _probe(task_type, num_runs, state0, W_init)
+        components[f"baseline_{label}"] = baseline[task_type]
+
+    bwt_terms = []
+    for (task_type, num_runs), label in zip(task_order[:-1], labels[:-1]):
+        r_final_test = _probe(task_type, num_runs, state_final, W_final)
+        components[f"R_{label}_final_test"] = r_final_test
+        bwt_terms.append(r_final_test - r_diag[task_type])
+    bwt = sum(bwt_terms) / (num_tasks - 1)
+
+    fwt_terms = []
+    for idx in range(1, num_tasks):
+        prev_task_type, prev_label = task_order[idx - 1][0], labels[idx - 1]
+        task_type, num_runs, label = task_order[idx][0], task_order[idx][1], labels[idx]
+        r_zero_shot = _probe(task_type, num_runs, *checkpoint_after_task[prev_task_type])
+        components[f"R_{prev_label}_then_{label}_zero_shot"] = r_zero_shot
+        fwt_terms.append(r_zero_shot - baseline[task_type])
+    fwt = sum(fwt_terms) / (num_tasks - 1)
+
+    return {"bwt": bwt, "fwt": fwt, "components": components}
 
 
 # ==== 7) FITNESS EVALUATION =====================================================
@@ -511,7 +679,7 @@ def evaluate_generation(genome_flat, device, noise_generator, reward_generator, 
 
     frob_start = torch.linalg.matrix_norm(W_init, ord="fro", dim=(1, 2))
     state0 = torch.zeros(pop, constants.N, device=device)
-    state_final, W_final, training_reward, replay_reward, tracking = _run_paradigm(
+    state_final, W_final, training_reward, replay_reward, tracking, training_reward_by_task, checkpoint_after_task = _run_paradigm(
         genome, paradigm_phases, device, noise_generator, reward_generator, should_print,
         context_cues_on, sensory_cues_on, True, state0, W_init,  # reward cue is always on
         # during real evolution -- ablating it is only ever a diagnostic probe, see
@@ -551,6 +719,14 @@ def evaluate_generation(genome_flat, device, noise_generator, reward_generator, 
             context_cues_on, sensory_cues_on, state_final, W_final,
         )
         _record_cue_importance(evaluation_idx, context_importance, sensory_importance, reward_importance)
+
+        task_order = _training_task_order(paradigm_phases)
+        transfer_metrics = _measure_transfer_metrics(
+            genome, device, test_generator, context_cues_on, sensory_cues_on,
+            state0, W_init, checkpoint_after_task, state_final, W_final,
+            task_order, training_reward_by_task,
+        )
+        _record_transfer_metrics(evaluation_idx, transfer_metrics)
     else:
         fit_cpu = regularized_fitness.detach().cpu()
         print(f"CHAIN {_CHAIN_LABEL} - iter {evaluation_idx} - best: {float(fit_cpu.max()):.1f} - median: {float(fit_cpu.median()):.1f}")
