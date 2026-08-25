@@ -59,26 +59,78 @@ FIXED_SEEDS = {
 # SWEEP_PARAMS/seeds above. Edit freely; the "master_seed"/etc. entries here are
 # always overwritten per config (see build_config()).
 BASE_CONFIG = {
+    # ---- seeds ----
     "master_seed": None,   # overwritten per file by build_config()
-    "n_neurons": 15,
     "noise_seed": None,
     "reward_seed": None,
     "test_seed": None,
     "weight_init_seed": None,
+
+    # ---- evolutionary search: method choice + the hyperparameters that concern it.
+    # Exactly ONE es_method-specific block below should be uncommented at a time -- see
+    # runners/run_evolution.py's `match ES_METHOD` gating, which reads exactly the keys
+    # for whichever es_method is active and nothing else. Comment/uncomment the whole
+    # block (and flip es_method below to match) when switching which algorithm this
+    # batch generates configs for -- don't delete the inactive block, it's the reference
+    # copy for switching back.
+    #
+    # search_popsize/num_generations are read the same way by every es_method, but their
+    # *sensible* value differs a lot by algorithm (PGPE samples a large population fresh
+    # from one shared search distribution every generation; Cosyne maintains a much
+    # smaller population of literally-persisting individuals) -- kept as single
+    # non-duplicated keys here, so remember to also revisit their value when switching. ----
+    "es_method": "cosyne",
+    "num_generations": 300,
+    "search_popsize": 50,  # Cosyne's own documented example (see cosyne_* below) uses 50 --
+                            # PGPE ran this same key at 200, bump it back up when re-enabling PGPE
+
+    # ---- PGPE hyperparameters (see runners/run_evolution.py). Currently commented out --
+    # es_method above is "cosyne". Anti-stagnation measures are all independently opt-in via
+    # their own "*_enabled" flag; off here, matching run_evolution.py's own CONFIG.get(...)
+    # None-if-absent behavior. Their value params stay listed (with placeholder values) even
+    # while disabled, so flipping an "*_enabled" flag back on never trips run_evolution.py's
+    # fail-loud missing-key check. ----
+    # "radius_init": 200,
+    # "stdev_learning_rate": 0.01,
+    # "momentum": 0.9,
+    # "pgpe_stdev_min_enabled": False,
+    # "pgpe_stdev_min": 0.01,
+    # "pgpe_restart_enabled": False,
+    # "pgpe_restart_patience": 50,
+    # "pgpe_restart_min_improvement": 0.01,
+    # "pgpe_restart_radius": 200,
+    # "pgpe_center_perturb_enabled": False,
+    # "pgpe_center_perturb_interval": 50,
+    # "pgpe_center_perturb_std": 0.1,
+    # "pgpe_perturb_seed": 12345,
+
+    # ---- Cosyne hyperparameters (see runners/run_evolution.py). Active -- es_method above
+    # is "cosyne". Values are EvoTorch's own documented example (docs.evotorch.ai's "Gym
+    # Experiments with PGPE and CoSyNE" notebook, its Cosyne(...) call), not independently
+    # tuned yet -- a real tuning pass is still to come. cosyne_elitism_ratio/cosyne_eta/
+    # cosyne_num_children are explicitly None here, not omitted (this project never lets code
+    # silently fall back to a default -- see epann-code-style-principles): that notebook's
+    # Cosyne(...) call leaves them unset, which evotorch's own Cosyne.__init__ treats as
+    # "elitism via num_elites instead of elitism_ratio" / "one-point cross-over instead of
+    # SBX" / "num_children = popsize/2" -- these are this run's genuinely CHOSEN values
+    # (None), written down instead of left implicit. num_elites and elitism_ratio are
+    # mutually exclusive in Cosyne's own constructor -- exactly one of the two may be
+    # non-None at a time. ----
+    "cosyne_tournament_size": 4,
+    "cosyne_mutation_stdev": 0.3,
+    "cosyne_mutation_probability": 0.5,
+    "cosyne_permute_all": True,
+    "cosyne_num_elites": 1,
+    "cosyne_elitism_ratio": None,
+    "cosyne_eta": None,
+    "cosyne_num_children": None,
+
+    # ---- general experiment parameters ----
+    "n_neurons": 15,
     "evo_context_cues_on": False,
     "evo_sensory_cues_on": True,
     "evo_plasticity_on": True,
     "paradigm": "trainA, 50, replay, 10, trainB, 50",
-    "num_generations": 300,
-    "search_popsize": 200,
-    "radius_init": 200,
-    "stdev_learning_rate": 0.01,
-    "momentum": 0.9,
-    "l1_lambda": 0.001,
-    "tracked_per_interval": 50,
-    "max_networks_preview": 6,
-    "max_runs_preview": 20,
-    "hist_bin_width": 1,
     "dt": 0.2,
     "tau": 1.0,
     "noise_std": 0.1,
@@ -88,21 +140,13 @@ BASE_CONFIG = {
     "crash_penalty": -0.4,
     "turn_reward_big": 1.0,
     "turn_reward_small": 0.0,
-    # ---- PGPE anti-stagnation measures (see runners/run_evolution.py) -- all three are
-    # independently opt-in via their own "*_enabled" flag; off by default here, matching
-    # run_evolution.py's own CONFIG.get(..., False) fallback. Their value params are still
-    # included (with placeholder defaults) even while disabled, so flipping an "*_enabled"
-    # flag on for a sweep never trips run_evolution.py's fail-loud missing-key check. ----
-    "pgpe_stdev_min_enabled": False,
-    "pgpe_stdev_min": 0.01,
-    "pgpe_restart_enabled": False,
-    "pgpe_restart_patience": 50,
-    "pgpe_restart_min_improvement": 0.01,
-    "pgpe_restart_radius": 200,
-    "pgpe_center_perturb_enabled": False,
-    "pgpe_center_perturb_interval": 50,
-    "pgpe_center_perturb_std": 0.1,
-    "pgpe_perturb_seed": 12345,
+    "l1_lambda": 0.001,
+
+    # ---- anything else (tracking/plot cadence) ----
+    "tracked_per_interval": 50,
+    "max_networks_preview": 6,
+    "max_runs_preview": 20,
+    "hist_bin_width": 1,
 }
 
 # applied on top of BASE_CONFIG for this batch, before SWEEP_PARAMS -- so a swept
