@@ -5,18 +5,18 @@ Usage: python run_evolution.py <config_name> <experiment_name> <device> <chain_l
 chain_label is just a display label for terminal output (run_batch.py passes its chain
 index; a manual run can pass anything, e.g. "manual").
 
-early_termination_enabled is exactly "True" or "False" (fails loudly on anything else --
+early_termination_enabled is exactly "True" or "False" (fails loudly on anything else -
 argv values are always strings, so this project's style forbids silently guessing what a
 different value would mean). When "True" (the normal case): on a detailed-print
 generation (skipping generation 1), for EITHER task (trainA/trainB) across the whole
 tracked population, if one turn direction (or one CORRECT turn direction) never happened
 at all, the run stops there and saves everything normally, as if that were the final
-generation -- the population has collapsed onto a degenerate policy that isn't going
+generation - the population has collapsed onto a degenerate policy that isn't going
 to develop further, so finishing out the configured generation count is wasted
 compute. See sim_core/fitness.py's _check_event_count_termination for the exact
 conditions (and why "every run crashed" is deliberately NOT one of them). When "False":
 the same criterion is still detected and printed every time it's met, but the run is
-never actually stopped early -- it always runs the full configured generation count --
+never actually stopped early - it always runs the full configured generation count -
 for deliberately forcing a run past what looks like a collapsed population, e.g. to see
 whether it recovers given more generations.
 """
@@ -39,13 +39,14 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 import evotorch
 import matplotlib
-matplotlib.use("Agg")  # headless -- this only ever calls savefig(), never plt.show(), and a
+matplotlib.use("Agg")  # headless - this only ever calls savefig(), never plt.show(), and a
                         # remote GPU server reached over VPN may have no display/Tk at all
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from evotorch import Problem
 from evotorch.algorithms import PGPE
+from evotorch.tools import stdev_from_radius
 
 from analysis.decision_plotting import (
     DECISION_CMAP,
@@ -65,18 +66,18 @@ from sim_core.fitness import PHASE_CONTEXT, configure_printing, fitness_function
 from sim_core.paradigm import PHASE_REPLAY, parse_paradigm
 
 # ==== 2) CONFIG LOADING + OUTPUT LOCATION =======================================
-# Results always live under the hardcoded DATA_ROOT -- not a user choice. The
-# config is found by joining CONFIGS_ROOT with the given name + ".json" -- that's
+# Results always live under the hardcoded DATA_ROOT - not a user choice. The
+# config is found by joining CONFIGS_ROOT with the given name + ".json" - that's
 # it, nothing else: for a plain name that's configs/<name>.json; run_batch.py
 # reaches configs/batch_to_run/<name>.json the same way, by passing
 # "batch_to_run/<name>" as that same argument. No defaults/fallbacks on the
-# config contents -- a missing or malformed field fails loudly (KeyError), on purpose.
+# config contents - a missing or malformed field fails loudly (KeyError), on purpose.
 CONFIGS_ROOT = PROJECT_ROOT / "configs"
 DATA_ROOT = PROJECT_ROOT / "data"
 
 
 def _parse_bool_arg(value, arg_name):
-    """Strict True/False CLI-argument parser -- argv values are always strings, and this
+    """Strict True/False CLI-argument parser - argv values are always strings, and this
     project's style forbids silently guessing (e.g. treating any non-"False" string as
     True), so anything other than exactly "True" or "False" fails loudly."""
     if value == "True":
@@ -93,7 +94,7 @@ if len(sys.argv) != 6:
     )
 CONFIG_PATH = CONFIGS_ROOT / f"{sys.argv[1]}.json"
 OUTPUT_ROOT = DATA_ROOT / sys.argv[2]
-CHAIN_LABEL = sys.argv[4]  # printed as "CHAIN <label>" in terminal output -- run_batch.py passes
+CHAIN_LABEL = sys.argv[4]  # printed as "CHAIN <label>" in terminal output - run_batch.py passes
                             # its chain index; a manual run can pass anything, e.g. "manual"
 EARLY_TERMINATION_ENABLED = _parse_bool_arg(sys.argv[5], "early_termination_enabled")
 with open(CONFIG_PATH, "r", encoding="utf-8") as _config_file:
@@ -104,18 +105,18 @@ RUN_TIMESTAMP = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")  # year->...->
                                                                      # alphabetical (file explorer)
                                                                      # order is chronological order
 RUN_DIR = OUTPUT_ROOT / f"{RUN_NAME}_{RUN_TIMESTAMP}"  # everything this run produces lives here
-DEVICE = sys.argv[3]  # required CLI input -- always wins, even if the config json still has its
+DEVICE = sys.argv[3]  # required CLI input - always wins, even if the config json still has its
                        # own (by-now-vestigial) "device" field
 N_NEURONS = CONFIG["n_neurons"]  # total neurons; see constants.configure_network() for the fixed
                                   # input/output assignment + derived hidden-neuron count
 MASTER_SEED = CONFIG["master_seed"]
 NOISE_SEED = CONFIG["noise_seed"]
 REWARD_SEED = CONFIG["reward_seed"]
-TEST_SEED = CONFIG["test_seed"]  # dedicated RNG stream for cue-importance measurement only -- never
+TEST_SEED = CONFIG["test_seed"]  # dedicated RNG stream for cue-importance measurement only - never
                                   # touches noise_generator/reward_generator, so the tracking interval
                                   # can't change the run
 WEIGHT_INIT_SEED = CONFIG["weight_init_seed"]  # dedicated RNG stream for the fresh per-lifetime initial-weight
-                                                # draw (sample_initial_weights) -- never touches any other stream
+                                                # draw (sample_initial_weights) - never touches any other stream
 
 EVO_CONTEXT_CUES_ON = CONFIG["evo_context_cues_on"]  # if False, context-cue input neurons are clipped to zero during evolution
 EVO_SENSORY_CUES_ON = CONFIG["evo_sensory_cues_on"]  # if False, sensory-cue input neurons are clipped to zero during evolution
@@ -126,17 +127,17 @@ EVO_PLASTICITY_ON = CONFIG["evo_plasticity_on"]  # if False, eta is forced to al
 # number of ticks). Parsed eagerly below so a malformed string fails at import time.
 PARADIGM = CONFIG["paradigm"]
 PARADIGM_PHASES = parse_paradigm(PARADIGM)
-# ordered list of (phase_type, num_runs) for training phases only, replay skipped --
+# ordered list of (phase_type, num_runs) for training phases only, replay skipped -
 # this must stay in the same order fitness.py concatenates tracking segments in
 TRAINING_PHASE_LAYOUT = [(phase_type, value) for phase_type, value in PARADIGM_PHASES if phase_type != PHASE_REPLAY]
 
 # FWT/BWT (see sim_core/fitness.py's _measure_transfer_metrics) generalize to however
 # many DISTINCT training tasks this paradigm actually has (T >= 2, in whatever order the
-# paradigm trains them) -- today T is always 2, but nothing here (or in fitness.py) needs
-# touching if a future paradigm adds a third task, e.g. a double-T-maze -- only
+# paradigm trains them) - today T is always 2, but nothing here (or in fitness.py) needs
+# touching if a future paradigm adds a third task, e.g. a double-T-maze - only
 # paradigm.py's VALID_PHASE_TYPES and fitness.py's PHASE_CONTEXT need to learn the new
 # task type exists at all. Fail loudly here, at config-load time, if the paradigm has
-# fewer than two distinct training tasks or repeats one -- rather than only discovering
+# fewer than two distinct training tasks or repeats one - rather than only discovering
 # it once fitness.py's own identical check fires mid-evolution. TASK_ORDER_LABELS (e.g.
 # ["A", "B"] or, one day, ["A", "B", "C"]) reflects this run's ACTUAL paradigm order, so
 # plot/CSV labels are always correct regardless of task count or order.
@@ -157,15 +158,64 @@ CENTER_LEARNING_RATE = MAX_SPEED / 2    # this is the step size in the ClipUp pa
 STDEV_LEARNING_RATE = CONFIG["stdev_learning_rate"]
 MOMENTUM = CONFIG["momentum"]
 
+
+def _config_get_if_enabled(enabled, key):
+    """Reads CONFIG[key], but only requires it to be present if `enabled` is True.
+
+    These pgpe_* anti-stagnation keys (added 2026-08) are opt-in and postdate ~500
+    existing sweep/archive configs under configs/ that were never meant to define them.
+    Retrofitting a required key onto every one of those was judged out of scope for
+    "implement these 3 measures" and risked touching other queued/archived experiments.
+    So: when a measure is off, its parameters are allowed to be absent (CONFIG.get(...)
+    with a None default) and are never read. When a measure IS turned on for a given
+    run's config, its parameters go back to this project's normal fail-loudly rule -
+    a missing key still raises KeyError via plain CONFIG[key] indexing, same as every
+    other field above."""
+    if not enabled:
+        return None
+    return CONFIG[key]
+
+
+# ---- PGPE anti-stagnation measures (all opt-in, off unless enabled in this run's config) ----
+# All three are independently toggleable via their own "*_enabled" flag, specifically so they
+# can be turned on together for an initial "big swing" test and then removed one at a time to
+# see which one(s) actually mattered.
+
+PGPE_STDEV_MIN_ENABLED = CONFIG.get("pgpe_stdev_min_enabled")
+# Elementwise floor on PGPE's search stdev, enforced natively by evotorch's PGPE/
+# GaussianSearchAlgorithm on every generation (see stdev_min passed into PGPE(...) below) -
+# NOT a manual post-hoc clamp. Keeps the search distribution from ever collapsing its
+# exploration width below this value in any genome dimension.
+PGPE_STDEV_MIN = _config_get_if_enabled(PGPE_STDEV_MIN_ENABLED, "pgpe_stdev_min")
+
+PGPE_RESTART_ENABLED = CONFIG.get("pgpe_restart_enabled")
+# Stagnation-triggered restart: if the population-best fitness hasn't improved by more than
+# pgpe_restart_min_improvement for pgpe_restart_patience consecutive generations, stdev is
+# reset to the radius given by pgpe_restart_radius (converted the same way radius_init is,
+# via evotorch's stdev_from_radius) and the ClipUp momentum buffer is zeroed. Center is left
+# untouched.
+PGPE_RESTART_PATIENCE = _config_get_if_enabled(PGPE_RESTART_ENABLED, "pgpe_restart_patience")
+PGPE_RESTART_MIN_IMPROVEMENT = _config_get_if_enabled(PGPE_RESTART_ENABLED, "pgpe_restart_min_improvement")
+PGPE_RESTART_RADIUS = _config_get_if_enabled(PGPE_RESTART_ENABLED, "pgpe_restart_radius")
+
+PGPE_CENTER_PERTURB_ENABLED = CONFIG.get("pgpe_center_perturb_enabled")
+# Every pgpe_center_perturb_interval generations, adds isolated N(0, pgpe_center_perturb_std)
+# noise directly onto the search distribution's center - independent of the restart trigger,
+# meant to nudge PGPE off flat/plateau regions even when stdev hasn't collapsed enough to
+# fire a restart. Uses its own seeded RNG stream (pgpe_perturb_seed).
+PGPE_CENTER_PERTURB_INTERVAL = _config_get_if_enabled(PGPE_CENTER_PERTURB_ENABLED, "pgpe_center_perturb_interval")
+PGPE_CENTER_PERTURB_STD = _config_get_if_enabled(PGPE_CENTER_PERTURB_ENABLED, "pgpe_center_perturb_std")
+PGPE_PERTURB_SEED = _config_get_if_enabled(PGPE_CENTER_PERTURB_ENABLED, "pgpe_perturb_seed")
+
 L1_LAMBDA = CONFIG["l1_lambda"]
 
 TRACKED_PER_INTERVAL = CONFIG["tracked_per_interval"]
 MAX_NETWORKS_PREVIEW = CONFIG["max_networks_preview"]
 MAX_RUNS_PREVIEW = CONFIG["max_runs_preview"]
 HIST_BIN_WIDTH = CONFIG["hist_bin_width"]
-PLOT_DPI = 180  # presentation-only, not an experiment parameter -- stays fixed
+PLOT_DPI = 180 
 
-# Network layout + tunable sim_core constants (reward shaping + CTRNN dynamics) --
+# Network layout + tunable sim_core constants (reward shaping + CTRNN dynamics) -
 # set once, here, before any simulation code runs; sim_core modules read
 # constants.X live at call time, so this is the only place that needs to know
 # about the config file. configure_network() must run before genome_codec's
@@ -201,7 +251,7 @@ TRANSFER_METRICS_FILENAME = "transfer_metrics.png"
 PGPE_PARAMS_FILENAME = "pgpe_params.png"
 PGPE_FITNESS_FILENAME = "pgpe_fitness.png"
 
-# One CSV companion per PNG above (same stem, ".csv" instead of ".png") -- holds
+# One CSV companion per PNG above (same stem, ".csv" instead of ".png") - holds
 # exactly the already-wrangled data that PNG was drawn from, see analysis/csv_export.py.
 DECISIONS_CSV_FILENAME = "decisions.csv"
 ALL_DECISIONS_CSV_FILENAME = "all_decisions.csv"
@@ -274,10 +324,23 @@ def _init_pgpe_history():
         "fitness_mean": [],
         "fitness_max": [],
         "fitness_std": [],
+        # Anti-stagnation event log - meaningful only for whichever of the three measures
+        # is enabled in this run's config; 0/False throughout when a measure is disabled.
+        "generations_since_improvement": [],
+        "restart_triggered": [],
+        "center_perturbed": [],
     }
 
 
-def _collect_pgpe_history(searcher, reward_evolution, pgpe_history):
+def _collect_pgpe_history(
+    searcher,
+    reward_evolution,
+    pgpe_history,
+    *,
+    generations_since_improvement=0,
+    restart_triggered=False,
+    center_perturbed=False,
+):
     status = searcher.status
 
     generation = int(reward_evolution["generation"][-1])
@@ -309,6 +372,51 @@ def _collect_pgpe_history(searcher, reward_evolution, pgpe_history):
     pgpe_history["fitness_mean"].append(float(reward_evolution["mean_eval"][-1]))
     pgpe_history["fitness_max"].append(float(reward_evolution["pop_best_eval"][-1]))
     pgpe_history["fitness_std"].append(float(reward_evolution["std_eval"][-1]))
+    pgpe_history["generations_since_improvement"].append(int(generations_since_improvement))
+    pgpe_history["restart_triggered"].append(bool(restart_triggered))
+    pgpe_history["center_perturbed"].append(bool(center_perturbed))
+
+
+def _restart_pgpe_distribution(searcher):
+    """Stagnation-triggered "big swing" restart: re-inflate the search distribution's
+    stdev back to PGPE_RESTART_RADIUS (converted to stdev via evotorch's own
+    stdev_from_radius, the same conversion used for radius_init at construction time),
+    and zero out the ClipUp optimizer's momentum buffer.
+
+    Center is deliberately left untouched here - a restart hands PGPE's current
+    best-guess center a fresh, wide search radius to explore around, rather than
+    discarding progress already made.
+
+    Momentum is reset alongside stdev because stale ClipUp velocity would immediately 
+    drag the center back along the pre-restart trajectory on the very next step, 
+    undermining the point of re-inflating exploration.
+
+    Mutates searcher._distribution.sigma directly (verified against evotorch 0.6.1's
+    SeparableGaussian: mu/sigma are plain settable properties on the *live* distribution
+    object, re-read fresh by _fill()/update_parameters() on every subsequent step - there
+    is no other cached state to go stale). searcher.center/.stdev are read-only status-getter
+    proxies onto this same object and are NOT safe to assign directly - doing so would
+    silently create a shadow attribute that the actual search loop never reads.
+    """
+    restart_sigma_value = stdev_from_radius(PGPE_RESTART_RADIUS, GENOME_LENGTH)
+    new_sigma = torch.full((GENOME_LENGTH,), restart_sigma_value, device=DEVICE)
+    if PGPE_STDEV_MIN_ENABLED:
+        # Don't restart to below the floor if the floor (independently) exceeds the
+        # restart radius' stdev - keeps the two measures from fighting each other.
+        new_sigma = torch.clamp(new_sigma, min=PGPE_STDEV_MIN)
+    searcher._distribution.sigma = new_sigma
+
+    if searcher.optimizer is not None:
+        searcher.optimizer._velocity.zero_()
+
+
+def _perturb_pgpe_center(searcher, generator):
+    """Adds one isolated N(0, PGPE_CENTER_PERTURB_STD) draw per genome dimension directly
+    onto the search distribution's center. Same mutation-safety
+    reasoning as _restart_pgpe_distribution applies here to searcher._distribution.mu."""
+    current_mu = searcher._distribution.mu
+    noise = torch.randn(current_mu.shape, generator=generator, device=DEVICE) * PGPE_CENTER_PERTURB_STD
+    searcher._distribution.mu = current_mu + noise
 
 
 def _save_pgpe_params_plot(plot_dir, pgpe_history):
@@ -397,7 +505,7 @@ def _prefixed_path(plot_dir, filename):
 def _columns_to_rows(columns):
     """columns: dict of column_name -> equal-length sequence (first column is normally
     "generation"). Returns one dict (row) per index, column order matching insertion
-    order -- for the many per-generation line plots below whose CSV is just their
+    order - for the many per-generation line plots below whose CSV is just their
     plotted line(s) transposed into rows."""
     names = list(columns.keys())
     length = len(columns[names[0]])
@@ -542,7 +650,7 @@ def _save_event_counts_plot(plot_dir, tracked_records, tracked_generations, colo
     """Save a grid of grouped bar plots, one row per training-phase segment in
     TRAINING_PHASE_LAYOUT (replay segments skipped). Each row is a group per tracked
     generation, with one bar per event (x, Lx, Rx, lx, rx, L, R, l, r), showing what %
-    of that generation's events -- within that training-phase segment's runs only --
+    of that generation's events - within that training-phase segment's runs only -
     each event type accounted for."""
     event_labels = DECISION_LABELS[1:]  # exclude "." (not a real event, just padding)
     event_colors = DECISION_COLORS[1:]  # same event -> color mapping as the decision heatmaps
@@ -574,7 +682,7 @@ def _save_event_counts_plot(plot_dir, tracked_records, tracked_generations, colo
             for e_idx in range(n_events):
                 counts[g_idx, e_idx] = int((matrix == e_idx + 1).sum())
 
-        # percentage of that generation's events (the 9 real event types only -- "." padding
+        # percentage of that generation's events (the 9 real event types only - "." padding
         # is excluded from both the numerator and the denominator), so each generation's bars
         # sum to 100% regardless of how many runs actually completed.
         totals = counts.sum(axis=1, keepdims=True)
@@ -906,16 +1014,16 @@ def _save_sensory_cue_plot(plot_dir, tracked_records):
 
 
 def _save_transfer_metrics_plot(plot_dir, transfer_metrics_history):
-    """Save tracked-generation FWT/BWT plot -- Lopez-Paz & Ranzato (2017) "Gradient
+    """Save tracked-generation FWT/BWT plot - Lopez-Paz & Ranzato (2017) "Gradient
     Episodic Memory for Continual Learning", Eqs. 3-4, generalized to however many
     distinct training tasks THIS paradigm actually has (see sim_core/fitness.py's
     _measure_transfer_metrics; TASK_ORDER_LABELS, module-level, reflects this run's
-    actual paradigm order/count -- e.g. ["A","B"] or, once a third task exists,
-    ["A","B","C"] -- so titles/columns are correct regardless of task count or order).
+    actual paradigm order/count - e.g. ["A","B"] or, once a third task exists,
+    ["A","B","C"] - so titles/columns are correct regardless of task count or order).
     Both metrics are already averaged over however many task-pair terms T-1 produces
     (T = len(TASK_ORDER_LABELS)), matching the paper's single reported FWT/BWT number
-    per model -- so the plot itself never grows with T, only the CSV's traceability
-    columns do (one _mean column per underlying R_i,i / R_T,i / R_i-1,i / b_i probe --
+    per model - so the plot itself never grows with T, only the CSV's traceability
+    columns do (one _mean column per underlying R_i,i / R_T,i / R_i-1,i / b_i probe -
     see transfer_metrics_history's dynamically-named keys)."""
     generations = np.array(transfer_metrics_history["generation"])
     fwt_mean = np.array(transfer_metrics_history["fwt_mean"])
@@ -962,7 +1070,7 @@ def _save_transfer_metrics_plot(plot_dir, transfer_metrics_history):
 def _save_all_plots_and_results(searcher, history, pgpe_history):
     """Create RUN_DIR, copy the config file used for this run into it, save all
     tracking plots, and write the full numeric results (final genomes + history)
-    to RESULTS_FILENAME -- all into the one timestamped, collision-proof folder."""
+    to RESULTS_FILENAME - all into the one timestamped, collision-proof folder."""
     RUN_DIR.mkdir(parents=True, exist_ok=True)
     shutil.copy2(CONFIG_PATH, RUN_DIR / CONFIG_PATH.name)
 
@@ -1059,15 +1167,51 @@ searcher = PGPE(
     center_init=center_init,
     optimizer="clipup",
     optimizer_config={"max_speed": MAX_SPEED, "momentum": MOMENTUM},
+    stdev_min=PGPE_STDEV_MIN,  # None -> no floor, identical to this file's old behavior
 )
 
+perturb_generator = None
+if PGPE_CENTER_PERTURB_ENABLED:
+    perturb_generator = torch.Generator(device=DEVICE)
+    perturb_generator.manual_seed(PGPE_PERTURB_SEED)
+
 pgpe_history = _init_pgpe_history()
-for _ in range(NUM_GENERATIONS):
+best_fitness_ever = float("-inf")
+generations_since_improvement = 0
+for generation_idx in range(1, NUM_GENERATIONS + 1):
     searcher.step()
     history_snapshot = get_printing_history()
-    _collect_pgpe_history(searcher, history_snapshot["reward_evolution"], pgpe_history)
+    reward_evolution = history_snapshot["reward_evolution"]
+
+    restart_triggered = False
+    if PGPE_RESTART_ENABLED:
+        current_best = float(reward_evolution["pop_best_eval"][-1])
+        if current_best > (best_fitness_ever + PGPE_RESTART_MIN_IMPROVEMENT):
+            best_fitness_ever = current_best
+            generations_since_improvement = 0
+        else:
+            generations_since_improvement += 1
+
+        if generations_since_improvement >= PGPE_RESTART_PATIENCE:
+            restart_triggered = True
+            _restart_pgpe_distribution(searcher)
+            generations_since_improvement = 0
+
+    center_perturbed = False
+    if PGPE_CENTER_PERTURB_ENABLED and (generation_idx % PGPE_CENTER_PERTURB_INTERVAL == 0):
+        center_perturbed = True
+        _perturb_pgpe_center(searcher, perturb_generator)
+
+    _collect_pgpe_history(
+        searcher,
+        reward_evolution,
+        pgpe_history,
+        generations_since_improvement=generations_since_improvement,
+        restart_triggered=restart_triggered,
+        center_perturbed=center_perturbed,
+    )
     if should_terminate_early():
-        break  # population converged to always turning one direction -- see fitness.py's
+        break  # population converged to always turning one direction - see fitness.py's
                # _print_tracking_block; everything below saves normally, just with fewer
                # generations than NUM_GENERATIONS actually happened
 

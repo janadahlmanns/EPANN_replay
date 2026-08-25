@@ -21,7 +21,7 @@ import random
 # ==== 2. CONSTANTS / USER INPUTS ============================================
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 OUTPUT_FOLDER = PROJECT_ROOT / "configs" / "generated_sweep"
-FILENAME_PREFIX = "test_"   # files are named f"{FILENAME_PREFIX}{combo_slug}_{i}.json"
+FILENAME_PREFIX = "test _"   # files are named f"{FILENAME_PREFIX}{combo_slug}_{i}.json"
 
 # Parameters to sweep -- the cartesian product of every list below becomes one
 # parameter combination (one "group" of N_CONFIGS_PER_GROUP configs). Keys must
@@ -88,6 +88,21 @@ BASE_CONFIG = {
     "crash_penalty": -0.4,
     "turn_reward_big": 1.0,
     "turn_reward_small": 0.0,
+    # ---- PGPE anti-stagnation measures (see runners/run_evolution.py) -- all three are
+    # independently opt-in via their own "*_enabled" flag; off by default here, matching
+    # run_evolution.py's own CONFIG.get(..., False) fallback. Their value params are still
+    # included (with placeholder defaults) even while disabled, so flipping an "*_enabled"
+    # flag on for a sweep never trips run_evolution.py's fail-loud missing-key check. ----
+    "pgpe_stdev_min_enabled": False,
+    "pgpe_stdev_min": 0.01,
+    "pgpe_restart_enabled": False,
+    "pgpe_restart_patience": 50,
+    "pgpe_restart_min_improvement": 0.01,
+    "pgpe_restart_radius": 200,
+    "pgpe_center_perturb_enabled": False,
+    "pgpe_center_perturb_interval": 50,
+    "pgpe_center_perturb_std": 0.1,
+    "pgpe_perturb_seed": 12345,
 }
 
 # applied on top of BASE_CONFIG for this batch, before SWEEP_PARAMS -- so a swept
