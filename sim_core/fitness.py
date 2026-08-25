@@ -15,6 +15,9 @@ PHASE_CONTEXT = {PHASE_TRAIN_A: "A", PHASE_TRAIN_B: "B"}
 
 _TOTAL_GENERATIONS = None
 _PRINT_INTERVAL = None
+_FORCE_TRACK_FIRST_N = None  # always track/print the first N evaluations of a run, regardless of
+                              # _PRINT_INTERVAL -- general mechanism, but N is an es_method-specific
+                              # VALUE chosen by run_evolution.py (see configure_printing's docstring)
 _MAX_NETWORKS_PREVIEW = None
 _MAX_RUNS_PREVIEW = None
 _CHAIN_LABEL = None  # printed as "CHAIN <label>" -- identifies which run_batch.py chain (or
@@ -89,9 +92,23 @@ def configure_printing(
     chain_label,
     config_name,
     early_termination_enabled,
+    force_track_first_n,
 ):
-    """Set printing cadence and clear history buffers for a fresh run."""
-    global _TOTAL_GENERATIONS, _PRINT_INTERVAL
+    """Set printing cadence and clear history buffers for a fresh run.
+
+    force_track_first_n: always track/print evaluation_idx 1..force_track_first_n,
+    regardless of print_interval -- general mechanism (see _should_print), but the VALUE
+    is es_method-specific, chosen by run_evolution.py. PGPE (and any method where one
+    searcher.step() == exactly one real generation) wants 1, matching this project's
+    original "always track generation 1" behavior exactly. Cosyne wants 2: its searcher's
+    very first .step() secretly evaluates the raw initial population once before its
+    first real generation (see sim_core/fitness.py's discard_earliest_recorded_generation
+    docstring) -- that phantom evaluation is evaluation_idx 1 and always gets discarded,
+    so evaluation_idx 2 (the first REAL generation, renumbered down to 1 afterward) must
+    ALSO be force-tracked here, or it silently ends up with no tracking data at all
+    whenever print_interval doesn't happen to divide 2 -- and tracking data cannot be
+    reconstructed after the fact once a generation has already run without it."""
+    global _TOTAL_GENERATIONS, _PRINT_INTERVAL, _FORCE_TRACK_FIRST_N
     global _MAX_NETWORKS_PREVIEW, _MAX_RUNS_PREVIEW
     global _CHAIN_LABEL, _CONFIG_NAME, _EARLY_TERMINATION_ENABLED, _TERMINATE_EARLY
     global _TRACKED_GENERATIONS, _TRACKED_RECORDS, _REWARD_EVOLUTION
@@ -99,6 +116,7 @@ def configure_printing(
 
     _TOTAL_GENERATIONS = total_generations
     _PRINT_INTERVAL = print_interval
+    _FORCE_TRACK_FIRST_N = force_track_first_n
     _MAX_NETWORKS_PREVIEW = max_networks_preview
     _MAX_RUNS_PREVIEW = max_runs_preview
     _CHAIN_LABEL = chain_label
@@ -165,6 +183,63 @@ def should_terminate_early():
     return _TERMINATE_EARLY
 
 
+def discard_earliest_recorded_generation():
+    """Drop the single OLDEST recorded generation's entries from every history buffer
+    (reward_evolution always; tracked_generations/tracked_records, cue_importance, and
+    transfer_metrics too, each only if their own oldest entry is actually that same
+    generation -- being tracked at all is conditional, see _should_print), THEN
+    renumber every remaining entry's stored "generation" label down by 1.
+
+    Renumbering is not cosmetic -- it's required for correctness: _should_print()/
+    evaluate_generation() derive the NEXT evaluation_idx from
+    len(_REWARD_EVOLUTION["generation"]) + 1, not from an independent counter. Popping
+    an entry off the front shrinks that length by 1, so without also shifting every
+    remaining label down by 1, the very next real generation would recompute the exact
+    evaluation_idx the just-discarded entry already used (and already printed) --
+    silently colliding two DIFFERENT generations onto the same label instead of just
+    leaving a gap. Shifting labels down keeps "list length == most recent generation
+    label" true, the same invariant that held before anything was ever discarded.
+
+    For evotorch's Cosyne specifically (see runners/run_evolution.py): its searcher's
+    very first .step() call evaluates the raw initial population once, BEFORE doing its
+    first real generation of selection/variation -- an extra, structurally different
+    (differently-sized, differently-composed) evaluation that both this function's
+    caller and evaluate_generation()/_record_history() above have no way to tell apart
+    from a real generation ahead of time, since it reaches this module through the exact
+    same fitness_function() entrypoint. Every OTHER algorithm here (PGPE; any future
+    single-shared-search-distribution or population-based method) calls evaluate() ==
+    exactly one generation for every real searcher.step(), so this is never needed for
+    them -- run_evolution.py calls this only from Cosyne's es_method branch, only once,
+    right after that first step()."""
+    global _REWARD_EVOLUTION, _TRACKED_GENERATIONS, _TRACKED_RECORDS
+    global _CUE_IMPORTANCE_HISTORY, _TRANSFER_METRICS_HISTORY
+
+    discarded_generation = _REWARD_EVOLUTION["generation"][0]
+    for key in _REWARD_EVOLUTION:
+        _REWARD_EVOLUTION[key].pop(0)
+    for idx in range(len(_REWARD_EVOLUTION["generation"])):
+        _REWARD_EVOLUTION["generation"][idx] -= 1
+
+    if _TRACKED_GENERATIONS and _TRACKED_GENERATIONS[0] == discarded_generation:
+        _TRACKED_GENERATIONS.pop(0)
+        _TRACKED_RECORDS.pop(0)
+    for idx in range(len(_TRACKED_GENERATIONS)):
+        _TRACKED_GENERATIONS[idx] -= 1
+        _TRACKED_RECORDS[idx]["generation"] -= 1
+
+    if _CUE_IMPORTANCE_HISTORY["generation"] and _CUE_IMPORTANCE_HISTORY["generation"][0] == discarded_generation:
+        for key in _CUE_IMPORTANCE_HISTORY:
+            _CUE_IMPORTANCE_HISTORY[key].pop(0)
+    for idx in range(len(_CUE_IMPORTANCE_HISTORY["generation"])):
+        _CUE_IMPORTANCE_HISTORY["generation"][idx] -= 1
+
+    if _TRANSFER_METRICS_HISTORY["generation"] and _TRANSFER_METRICS_HISTORY["generation"][0] == discarded_generation:
+        for key in _TRANSFER_METRICS_HISTORY:
+            _TRANSFER_METRICS_HISTORY[key].pop(0)
+    for idx in range(len(_TRANSFER_METRICS_HISTORY["generation"])):
+        _TRANSFER_METRICS_HISTORY["generation"][idx] -= 1
+
+
 # ==== 3) TERMINAL-FORMATTING HELPERS ===========================================
 def _format_table(headers, rows):
     cols = len(headers)
@@ -222,7 +297,7 @@ def _decision_symbol(decision, crashed, rewarded, correct_arm):
 
 
 def _should_print(evaluation_idx):
-    if evaluation_idx == 1:
+    if evaluation_idx <= _FORCE_TRACK_FIRST_N:
         return True
     if evaluation_idx == _TOTAL_GENERATIONS:
         return True

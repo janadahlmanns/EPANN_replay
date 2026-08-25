@@ -78,8 +78,10 @@ def _write_final_genomes(h5_file, searcher, es_method):
             stdev = status["stdev"].detach().reshape(1, -1)
             _write_genome_group(h5_file.create_group("genome/pgpe/center"), unflatten_genome(center, 1))
             _write_genome_group(h5_file.create_group("genome/pgpe/stdev"), unflatten_genome(stdev, 1))
+        case "cosyne":
+            pass  # no center/stdev concept for a genuinely population-based method
         case _:
-            raise ValueError(f"Unknown es_method {es_method!r}; only 'pgpe' is implemented so far.")
+            raise ValueError(f"Unknown es_method {es_method!r}; only 'pgpe'/'cosyne' are implemented so far.")
 
     best = status["pop_best"]
     best_group = h5_file.create_group("genome/best")
@@ -158,8 +160,10 @@ def save_results_h5(path, config, run_metadata, searcher, history, pgpe_history)
         match es_method:
             case "pgpe":
                 _write_flat_history(h5_file.create_group("history/pgpe"), pgpe_history)
+            case "cosyne":
+                pass  # no cosyne-specific history to write yet -- see run_evolution.py step 6
             case _:
-                raise ValueError(f"Unknown es_method {es_method!r}; only 'pgpe' is implemented so far.")
+                raise ValueError(f"Unknown es_method {es_method!r}; only 'pgpe'/'cosyne' are implemented so far.")
         _write_tracked_records(
             h5_file.create_group("history/tracked"),
             history["tracked_generations"],

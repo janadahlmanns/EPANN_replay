@@ -28,12 +28,12 @@ FILENAME_PREFIX = "test _"   # files are named f"{FILENAME_PREFIX}{combo_slug}_{
 # match BASE_CONFIG keys; add/remove sweep params freely, this file doesn't need
 # any other changes to keep working.
 SWEEP_PARAMS = {
-    "radius_init": [400],
-    "search_popsize": [10000],
-    "stdev_learning_rate": [0.1],
+    "cosyne_mutation_stdev": [0.3, 0.9],
+    "cosyne_tournament_size": [4, 12, 25],
+    "search_popsize": [50,200],
 }
 
-N_CONFIGS_PER_GROUP = 200   # number of seeded configs generated per parameter combination
+N_CONFIGS_PER_GROUP = 10   # number of seeded configs generated per parameter combination
 
 # ---- seeds: same 5 seed types as generate_configs.py. One list per type is
 # generated per SEED_MODE below, each of length
@@ -67,29 +67,17 @@ BASE_CONFIG = {
     "weight_init_seed": None,
 
     # ---- evolutionary search: method choice + the hyperparameters that concern it.
-    # Exactly ONE es_method-specific block below should be uncommented at a time -- see
-    # runners/run_evolution.py's `match ES_METHOD` gating, which reads exactly the keys
-    # for whichever es_method is active and nothing else. Comment/uncomment the whole
-    # block (and flip es_method below to match) when switching which algorithm this
-    # batch generates configs for -- don't delete the inactive block, it's the reference
-    # copy for switching back.
+
     #
     # search_popsize/num_generations are read the same way by every es_method, but their
     # *sensible* value differs a lot by algorithm (PGPE samples a large population fresh
     # from one shared search distribution every generation; Cosyne maintains a much
-    # smaller population of literally-persisting individuals) -- kept as single
-    # non-duplicated keys here, so remember to also revisit their value when switching. ----
+    # smaller population of literally-persisting individuals) 
     "es_method": "cosyne",
     "num_generations": 300,
-    "search_popsize": 50,  # Cosyne's own documented example (see cosyne_* below) uses 50 --
-                            # PGPE ran this same key at 200, bump it back up when re-enabling PGPE
+    "search_popsize": 200,  
 
-    # ---- PGPE hyperparameters (see runners/run_evolution.py). Currently commented out --
-    # es_method above is "cosyne". Anti-stagnation measures are all independently opt-in via
-    # their own "*_enabled" flag; off here, matching run_evolution.py's own CONFIG.get(...)
-    # None-if-absent behavior. Their value params stay listed (with placeholder values) even
-    # while disabled, so flipping an "*_enabled" flag back on never trips run_evolution.py's
-    # fail-loud missing-key check. ----
+    # ---- PGPE hyperparameters 
     # "radius_init": 200,
     # "stdev_learning_rate": 0.01,
     # "momentum": 0.9,
@@ -104,26 +92,17 @@ BASE_CONFIG = {
     # "pgpe_center_perturb_std": 0.1,
     # "pgpe_perturb_seed": 12345,
 
-    # ---- Cosyne hyperparameters (see runners/run_evolution.py). Active -- es_method above
-    # is "cosyne". Values are EvoTorch's own documented example (docs.evotorch.ai's "Gym
-    # Experiments with PGPE and CoSyNE" notebook, its Cosyne(...) call), not independently
-    # tuned yet -- a real tuning pass is still to come. cosyne_elitism_ratio/cosyne_eta/
-    # cosyne_num_children are explicitly None here, not omitted (this project never lets code
-    # silently fall back to a default -- see epann-code-style-principles): that notebook's
-    # Cosyne(...) call leaves them unset, which evotorch's own Cosyne.__init__ treats as
-    # "elitism via num_elites instead of elitism_ratio" / "one-point cross-over instead of
-    # SBX" / "num_children = popsize/2" -- these are this run's genuinely CHOSEN values
-    # (None), written down instead of left implicit. num_elites and elitism_ratio are
-    # mutually exclusive in Cosyne's own constructor -- exactly one of the two may be
-    # non-None at a time. ----
-    "cosyne_tournament_size": 4,
-    "cosyne_mutation_stdev": 0.3,
-    "cosyne_mutation_probability": 0.5,
+    # ---- Cosyne hyperparameters (see runners/run_evolution.py). 
+    "cosyne_tournament_size": 12,
+    "cosyne_mutation_stdev": 0.9,
+    "cosyne_mutation_probability": None,
     "cosyne_permute_all": True,
-    "cosyne_num_elites": 1,
-    "cosyne_elitism_ratio": None,
+    "cosyne_num_elites": None,
+    "cosyne_elitism_ratio": 0.1,
     "cosyne_eta": None,
     "cosyne_num_children": None,
+    "cosyne_initial_bounds_low": -0.3,
+    "cosyne_initial_bounds_high": 0.3,
 
     # ---- general experiment parameters ----
     "n_neurons": 15,

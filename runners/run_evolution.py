@@ -46,7 +46,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from evotorch import Problem
-from evotorch.algorithms import PGPE
+from evotorch.algorithms import PGPE, Cosyne
 from evotorch.tools import stdev_from_radius
 
 from analysis.decision_plotting import (
@@ -63,7 +63,14 @@ from analysis.csv_export import write_csv
 from analysis.results_io import results_filename, save_results_h5
 from sim_core import constants, genome_codec
 from sim_core.constants import INPUT_SENSORY_A, INPUT_SENSORY_B
-from sim_core.fitness import PHASE_CONTEXT, configure_printing, fitness_function, get_printing_history, should_terminate_early
+from sim_core.fitness import (
+    PHASE_CONTEXT,
+    configure_printing,
+    discard_earliest_recorded_generation,
+    fitness_function,
+    get_printing_history,
+    should_terminate_early,
+)
 from sim_core.paradigm import PHASE_REPLAY, parse_paradigm
 
 # ==== 2) CONFIG LOADING + OUTPUT LOCATION =======================================
@@ -155,8 +162,8 @@ ES_METHOD = CONFIG["es_method"]  # which evolutionary search algorithm this run 
                                   # es_method-specific block in this file (search hyperparameters right
                                   # below, searcher construction + per-generation anti-stagnation/history
                                   # tracking in the evolution loop, end-of-run diagnostic plots, all
-                                  # further down). Currently "pgpe" is the only implemented option;
-                                  # anything else fails loudly rather than silently falling through.
+                                  # further down). "pgpe" and "cosyne" are implemented; anything else
+                                  # fails loudly rather than silently falling through.
 
 # ---- general: hyperparameters every es_method needs, regardless of which one this run uses ----
 NUM_GENERATIONS = CONFIG["num_generations"]
@@ -218,8 +225,44 @@ match ES_METHOD:
         PGPE_CENTER_PERTURB_INTERVAL = _config_get_if_enabled(PGPE_CENTER_PERTURB_ENABLED, "pgpe_center_perturb_interval")
         PGPE_CENTER_PERTURB_STD = _config_get_if_enabled(PGPE_CENTER_PERTURB_ENABLED, "pgpe_center_perturb_std")
         PGPE_PERTURB_SEED = _config_get_if_enabled(PGPE_CENTER_PERTURB_ENABLED, "pgpe_perturb_seed")
+
+        # One searcher.step() == exactly one real generation for PGPE -- matches this project's
+        # original "always track generation 1" behavior exactly. See sim_core/fitness.py's
+        # configure_printing docstring for why this differs for cosyne.
+        FORCE_TRACK_FIRST_N = 1
+    case "cosyne":
+        # Every one of these is read unconditionally (plain CONFIG[key], fail-loud on missing) --
+        # unlike PGPE's anti-stagnation extras, none of Cosyne's own constructor arguments are
+        # opt-in. cosyne_elitism_ratio/cosyne_eta/cosyne_num_children are allowed to be JSON null
+        # (-> Python None here) -- that's a deliberately CHOSEN value (see configs/param_test_cosyne.json),
+        # not this file falling back to one; evotorch's Cosyne(...) itself treats None as "use
+        # num_elites instead of elitism_ratio" / "one-point cross-over instead of SBX" / "num_children
+        # = popsize/2" (see its constructor's own docstring).
+        COSYNE_TOURNAMENT_SIZE = CONFIG["cosyne_tournament_size"]
+        COSYNE_MUTATION_STDEV = CONFIG["cosyne_mutation_stdev"]
+        COSYNE_MUTATION_PROBABILITY = CONFIG["cosyne_mutation_probability"]
+        COSYNE_PERMUTE_ALL = CONFIG["cosyne_permute_all"]
+        COSYNE_NUM_ELITES = CONFIG["cosyne_num_elites"]
+        COSYNE_ELITISM_RATIO = CONFIG["cosyne_elitism_ratio"]
+        COSYNE_ETA = CONFIG["cosyne_eta"]
+        COSYNE_NUM_CHILDREN = CONFIG["cosyne_num_children"]
+        # Unlike PGPE (which builds its own Gaussian directly from center_init/radius_init,
+        # never calling Problem.generate_values()), Cosyne is population-based and needs the
+        # Problem itself to know how to sample an initial population -- see this file's
+        # `Problem(...)` construction further down, gated the same way for this exact reason.
+        COSYNE_INITIAL_BOUNDS_LOW = CONFIG["cosyne_initial_bounds_low"]
+        COSYNE_INITIAL_BOUNDS_HIGH = CONFIG["cosyne_initial_bounds_high"]
+
+        # Cosyne's searcher.step() == exactly one real generation EXCEPT its very first call,
+        # which secretly evaluates the raw initial population once first (evaluation_idx 1,
+        # always discarded -- see discard_earliest_recorded_generation). Force-track evaluation_idx
+        # 2 as well so the first REAL generation (which becomes generation 1 after discard's
+        # renumbering) has tracking data too, instead of silently having none whenever
+        # tracked_per_interval doesn't happen to divide 2 -- see sim_core/fitness.py's
+        # configure_printing docstring for the full reasoning.
+        FORCE_TRACK_FIRST_N = 2
     case _:
-        raise ValueError(f"Unknown es_method {ES_METHOD!r} in config; only 'pgpe' is implemented so far.")
+        raise ValueError(f"Unknown es_method {ES_METHOD!r} in config; only 'pgpe'/'cosyne' are implemented so far.")
 
 # ---- general again ----
 L1_LAMBDA = CONFIG["l1_lambda"]
@@ -1190,8 +1233,10 @@ def _save_all_plots_and_results(searcher, history, pgpe_history):
             _save_pgpe_params_plot(RUN_DIR, pgpe_history)
             _save_pgpe_fitness_plot(RUN_DIR, pgpe_history)
             _save_pgpe_stagnation_plot(RUN_DIR, pgpe_history)
+        case "cosyne":
+            pass  # no cosyne-specific diagnostic plots yet -- see step 6
         case _:
-            raise ValueError(f"Unknown es_method {ES_METHOD!r}; only 'pgpe' is implemented so far.")
+            raise ValueError(f"Unknown es_method {ES_METHOD!r}; only 'pgpe'/'cosyne' are implemented so far.")
 
     run_metadata = {
         "run_name": RUN_NAME,
@@ -1221,8 +1266,6 @@ test_generator.manual_seed(TEST_SEED)
 weight_init_generator = torch.Generator(device=DEVICE)
 weight_init_generator.manual_seed(WEIGHT_INIT_SEED)
 
-center_init = torch.zeros(GENOME_LENGTH, device=DEVICE)
-
 objective = functools.partial(
     fitness_function,
     device=DEVICE,
@@ -1245,19 +1288,43 @@ configure_printing(
     chain_label=CHAIN_LABEL,
     config_name=RUN_NAME,
     early_termination_enabled=EARLY_TERMINATION_ENABLED,
+    force_track_first_n=FORCE_TRACK_FIRST_N,
 )
 
-problem = Problem(
-    objective_sense="max",
-    objective_func=objective,
-    solution_length=GENOME_LENGTH,
-    device=DEVICE,
-    vectorized=True,
-)
+# ---- es_method-specific: Problem construction. General kwargs are identical either way,
+# but PGPE builds its own Gaussian directly from center_init/radius_init (below) and never
+# calls Problem.generate_values() at all, while Cosyne is population-based and needs the
+# Problem itself to know how to sample an initial population -- hence initial_bounds only
+# on the cosyne branch (see cosyne_initial_bounds_low/high, read above). ----
+match ES_METHOD:
+    case "pgpe":
+        problem = Problem(
+            objective_sense="max",
+            objective_func=objective,
+            solution_length=GENOME_LENGTH,
+            device=DEVICE,
+            vectorized=True,
+        )
+    case "cosyne":
+        problem = Problem(
+            objective_sense="max",
+            objective_func=objective,
+            solution_length=GENOME_LENGTH,
+            device=DEVICE,
+            vectorized=True,
+            initial_bounds=(COSYNE_INITIAL_BOUNDS_LOW, COSYNE_INITIAL_BOUNDS_HIGH),
+        )
+    case _:
+        raise ValueError(f"Unknown es_method {ES_METHOD!r}; only 'pgpe'/'cosyne' are implemented so far.")
 
 # ---- es_method-specific: searcher construction + its own history/RNG bookkeeping ----
 match ES_METHOD:
     case "pgpe":
+        # Start from an all-zero genome (see the project plan's Genome section) so every
+        # descendant's initial bias comes from evolution, not from this file -- only PGPE
+        # uses this; Cosyne instead samples its initial population from Problem's own
+        # initial_bounds (see the Problem(...) construction above).
+        center_init = torch.zeros(GENOME_LENGTH, device=DEVICE)
         searcher = PGPE(
             problem,
             popsize=SEARCH_POPSIZE,
@@ -1278,8 +1345,28 @@ match ES_METHOD:
         pgpe_history = _init_pgpe_history()
         best_fitness_ever = float("-inf")
         generations_since_improvement = 0
+    case "cosyne":
+        searcher = Cosyne(
+            problem,
+            popsize=SEARCH_POPSIZE,
+            tournament_size=COSYNE_TOURNAMENT_SIZE,
+            mutation_stdev=COSYNE_MUTATION_STDEV,
+            mutation_probability=COSYNE_MUTATION_PROBABILITY,
+            permute_all=COSYNE_PERMUTE_ALL,
+            num_elites=COSYNE_NUM_ELITES,
+            elitism_ratio=COSYNE_ELITISM_RATIO,
+            eta=COSYNE_ETA,
+            num_children=COSYNE_NUM_CHILDREN,
+        )
+        # Cosyne is a genuinely population-based method (a real persisting population IS its own
+        # anti-stagnation mechanism -- see the memory this project's PGPE restart/perturb hacks
+        # exist to work around), so it carries none of PGPE's extra history/RNG bookkeeping.
+        # pgpe_history stays defined (as None) purely so _save_all_plots_and_results' signature
+        # below doesn't need an es_method-conditional call -- it's never read for this es_method,
+        # see that function's own `match ES_METHOD` gate.
+        pgpe_history = None
     case _:
-        raise ValueError(f"Unknown es_method {ES_METHOD!r}; only 'pgpe' is implemented so far.")
+        raise ValueError(f"Unknown es_method {ES_METHOD!r}; only 'pgpe'/'cosyne' are implemented so far.")
 for generation_idx in range(1, NUM_GENERATIONS + 1):
     # ---- general: advance the search by one generation, read back this generation's tracking ----
     searcher.step()
@@ -1316,8 +1403,21 @@ for generation_idx in range(1, NUM_GENERATIONS + 1):
                 restart_triggered=restart_triggered,
                 center_perturbed=center_perturbed,
             )
+        case "cosyne":
+            if generation_idx == 1:
+                # Cosyne's very first .step() call (only ever the first) secretly evaluates
+                # the raw initial population once before doing its first real generation of
+                # selection/variation -- see discard_earliest_recorded_generation()'s
+                # docstring. Discard it so this run's saved/tracked history is exactly
+                # NUM_GENERATIONS entries, same convention as every other es_method, and so
+                # every tracked generation's evaluated-batch shape stays uniform (that
+                # initial-only eval is a different, smaller batch than every regular step's
+                # elites+children+permuted batch, which is otherwise constant generation to
+                # generation).
+                discard_earliest_recorded_generation()
+            # no other per-generation diagnostics for cosyne yet -- see step 6
         case _:
-            raise ValueError(f"Unknown es_method {ES_METHOD!r}; only 'pgpe' is implemented so far.")
+            raise ValueError(f"Unknown es_method {ES_METHOD!r}; only 'pgpe'/'cosyne' are implemented so far.")
 
     # ---- general: shared early-termination check, same for every es_method ----
     if should_terminate_early():
