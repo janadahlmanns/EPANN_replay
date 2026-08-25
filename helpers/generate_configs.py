@@ -28,12 +28,12 @@ FILENAME_PREFIX = "test _"   # files are named f"{FILENAME_PREFIX}{combo_slug}_{
 # match BASE_CONFIG keys; add/remove sweep params freely, this file doesn't need
 # any other changes to keep working.
 SWEEP_PARAMS = {
-    "radius_init": [400],
-    "search_popsize": [10000],
-    "stdev_learning_rate": [0.1],
+    "cosyne_mutation_stdev": [0.3, 0.9],
+    "cosyne_tournament_size": [4, 12, 25],
+    "search_popsize": [50,200],
 }
 
-N_CONFIGS_PER_GROUP = 200   # number of seeded configs generated per parameter combination
+N_CONFIGS_PER_GROUP = 10   # number of seeded configs generated per parameter combination
 
 # ---- seeds: same 5 seed types as generate_configs.py. One list per type is
 # generated per SEED_MODE below, each of length
@@ -59,26 +59,57 @@ FIXED_SEEDS = {
 # SWEEP_PARAMS/seeds above. Edit freely; the "master_seed"/etc. entries here are
 # always overwritten per config (see build_config()).
 BASE_CONFIG = {
+    # ---- seeds ----
     "master_seed": None,   # overwritten per file by build_config()
-    "n_neurons": 15,
     "noise_seed": None,
     "reward_seed": None,
     "test_seed": None,
     "weight_init_seed": None,
+
+    # ---- evolutionary search: method choice + the hyperparameters that concern it.
+
+    #
+    # search_popsize/num_generations are read the same way by every es_method, but their
+    # *sensible* value differs a lot by algorithm (PGPE samples a large population fresh
+    # from one shared search distribution every generation; Cosyne maintains a much
+    # smaller population of literally-persisting individuals) 
+    "es_method": "cosyne",
+    "num_generations": 300,
+    "search_popsize": 200,  
+
+    # ---- PGPE hyperparameters 
+    # "radius_init": 200,
+    # "stdev_learning_rate": 0.01,
+    # "momentum": 0.9,
+    # "pgpe_stdev_min_enabled": False,
+    # "pgpe_stdev_min": 0.01,
+    # "pgpe_restart_enabled": False,
+    # "pgpe_restart_patience": 50,
+    # "pgpe_restart_min_improvement": 0.01,
+    # "pgpe_restart_radius": 200,
+    # "pgpe_center_perturb_enabled": False,
+    # "pgpe_center_perturb_interval": 50,
+    # "pgpe_center_perturb_std": 0.1,
+    # "pgpe_perturb_seed": 12345,
+
+    # ---- Cosyne hyperparameters (see runners/run_evolution.py). 
+    "cosyne_tournament_size": 12,
+    "cosyne_mutation_stdev": 0.9,
+    "cosyne_mutation_probability": None,
+    "cosyne_permute_all": True,
+    "cosyne_num_elites": None,
+    "cosyne_elitism_ratio": 0.1,
+    "cosyne_eta": None,
+    "cosyne_num_children": None,
+    "cosyne_initial_bounds_low": -0.3,
+    "cosyne_initial_bounds_high": 0.3,
+
+    # ---- general experiment parameters ----
+    "n_neurons": 15,
     "evo_context_cues_on": False,
     "evo_sensory_cues_on": True,
     "evo_plasticity_on": True,
     "paradigm": "trainA, 50, replay, 10, trainB, 50",
-    "num_generations": 300,
-    "search_popsize": 200,
-    "radius_init": 200,
-    "stdev_learning_rate": 0.01,
-    "momentum": 0.9,
-    "l1_lambda": 0.001,
-    "tracked_per_interval": 50,
-    "max_networks_preview": 6,
-    "max_runs_preview": 20,
-    "hist_bin_width": 1,
     "dt": 0.2,
     "tau": 1.0,
     "noise_std": 0.1,
@@ -88,21 +119,13 @@ BASE_CONFIG = {
     "crash_penalty": -0.4,
     "turn_reward_big": 1.0,
     "turn_reward_small": 0.0,
-    # ---- PGPE anti-stagnation measures (see runners/run_evolution.py) -- all three are
-    # independently opt-in via their own "*_enabled" flag; off by default here, matching
-    # run_evolution.py's own CONFIG.get(..., False) fallback. Their value params are still
-    # included (with placeholder defaults) even while disabled, so flipping an "*_enabled"
-    # flag on for a sweep never trips run_evolution.py's fail-loud missing-key check. ----
-    "pgpe_stdev_min_enabled": False,
-    "pgpe_stdev_min": 0.01,
-    "pgpe_restart_enabled": False,
-    "pgpe_restart_patience": 50,
-    "pgpe_restart_min_improvement": 0.01,
-    "pgpe_restart_radius": 200,
-    "pgpe_center_perturb_enabled": False,
-    "pgpe_center_perturb_interval": 50,
-    "pgpe_center_perturb_std": 0.1,
-    "pgpe_perturb_seed": 12345,
+    "l1_lambda": 0.001,
+
+    # ---- anything else (tracking/plot cadence) ----
+    "tracked_per_interval": 50,
+    "max_networks_preview": 6,
+    "max_runs_preview": 20,
+    "hist_bin_width": 1,
 }
 
 # applied on top of BASE_CONFIG for this batch, before SWEEP_PARAMS -- so a swept

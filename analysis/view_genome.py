@@ -1,8 +1,15 @@
 """Genome viewer: loads a run's results.h5 and renders the evolved plasticity genome
-(A, B, C, D, eta, beta) for the BEST and CENTER individuals of the final generation,
-plus a separate faceted plot for the NxNxN modulatory tensor M (one NxN heatmap per
+(A, B, C, D, eta, beta) for the BEST individual of the final generation, plus a
+separate faceted plot for the NxNxN modulatory tensor M (one NxN heatmap per
 source/gating neuron) -- so we can actually look at what evolution baked into the
 plasticity rule instead of only judging it by task performance.
+
+BEST only, deliberately -- genome/best is general across every es_method (see
+analysis/results_io.py), so this viewer works unchanged no matter which search
+algorithm produced the run. An earlier version also plotted the CENTER individual,
+but "center" is a PGPE/Gaussian-search-distribution-only concept (genome/pgpe/center)
+with no equivalent for a genuinely population-based method like Cosyne -- dropped
+entirely rather than gated, so this tool stays comparable across es_methods.
 
 A, B, C, D, eta are (N, N) with axis 0 = post-synaptic neuron i, axis 1 = pre-synaptic
 neuron j (matches ctrnn.py's einsum("bij,bj->bi", W, state) convention). M is
@@ -44,18 +51,17 @@ OUTPUT_DIR = RUN_DIR
 
 # ==== 3) GENOME LOADING ===========================================================
 def _load_genome_group(h5_file, group_name):
-    """Load one genome group (best/center) into a dict of numpy arrays, squeezing the
+    """Load one genome group (genome/best) into a dict of numpy arrays, squeezing the
     leading pop=1 axis every tensor in that group is stored with."""
     group = h5_file[group_name]
     return {name: group[name][()][0] for name in ("A", "B", "C", "D", "eta", "beta", "M")}
 
 
-def _load_best_and_center(h5_path):
+def _load_best(h5_path):
     with h5py.File(h5_path, "r") as h5_file:
         best = _load_genome_group(h5_file, "genome/best")
         best_fitness = float(h5_file["genome/best/fitness"][()][0])
-        center = _load_genome_group(h5_file, "genome/center")
-    return best, best_fitness, center
+    return best, best_fitness
 
 
 # ==== 4) MAIN GENOME PLOT (A, B, C, D, eta, beta) ================================
@@ -156,12 +162,9 @@ def _plot_M_facets(M, label, subtitle, output_path):
 
 
 # ==== 6) MAIN EXECUTION ===========================================================
-BEST_GENOME, BEST_FITNESS, CENTER_GENOME = _load_best_and_center(H5_PATH)
+BEST_GENOME, BEST_FITNESS = _load_best(H5_PATH)
 
 _plot_main_genome_figure(BEST_GENOME, "BEST", f"fitness={BEST_FITNESS:.4f}", OUTPUT_DIR / f"{STEM}_best_genome.png")
 _plot_M_facets(BEST_GENOME["M"], "BEST", f"fitness={BEST_FITNESS:.4f}", OUTPUT_DIR / f"{STEM}_best_genome_M.png")
-
-_plot_main_genome_figure(CENTER_GENOME, "CENTER", "", OUTPUT_DIR / f"{STEM}_center_genome.png")
-_plot_M_facets(CENTER_GENOME["M"], "CENTER", "", OUTPUT_DIR / f"{STEM}_center_genome_M.png")
 
 print(f"Saved genome plots for {STEM} to: {OUTPUT_DIR}")
