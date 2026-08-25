@@ -250,6 +250,7 @@ INPUT_WEIGHING_FILENAME = "input_weighing.png"
 TRANSFER_METRICS_FILENAME = "transfer_metrics.png"
 PGPE_PARAMS_FILENAME = "pgpe_params.png"
 PGPE_FITNESS_FILENAME = "pgpe_fitness.png"
+PGPE_STAGNATION_FILENAME = "pgpe_stagnation.png"
 
 # One CSV companion per PNG above (same stem, ".csv" instead of ".png") - holds
 # exactly the already-wrangled data that PNG was drawn from, see analysis/csv_export.py.
@@ -267,6 +268,7 @@ INPUT_WEIGHING_CSV_FILENAME = "input_weighing.csv"
 TRANSFER_METRICS_CSV_FILENAME = "transfer_metrics.csv"
 PGPE_PARAMS_CSV_FILENAME = "pgpe_params.csv"
 PGPE_FITNESS_CSV_FILENAME = "pgpe_fitness.csv"
+PGPE_STAGNATION_CSV_FILENAME = "pgpe_stagnation.csv"
 REWARD_EVOLUTION_COLORS = ["#E07A5F", "#3D405B", "#81B29A"]
 PALETTE_COLORS = ["#E07A5F", "#3D405B", "#81B29A", "#F2CC8F", "#F4F1DE"]
 WEIGHT_HIST_BINS = 80
@@ -493,6 +495,79 @@ def _save_pgpe_fitness_plot(plot_dir, pgpe_history):
 
     write_csv(_prefixed_path(plot_dir, PGPE_FITNESS_CSV_FILENAME), _columns_to_rows({
         "generation": generations, "fitness_mean": fitness_mean, "fitness_max": fitness_max, "fitness_std": fitness_std,
+    }))
+
+
+def _save_pgpe_stagnation_plot(plot_dir, pgpe_history):
+    """Save a 3-panel diagnostic figure for the anti-stagnation measures (see the
+    "PGPE anti-stagnation measures" section above): fitness vs. restart/perturb events
+    (top), search stdev vs. its configured floor (middle), and the stagnation counter vs.
+    its configured patience with restart/perturb event markers (bottom). Purely a new
+    visualization of pgpe_history columns _collect_pgpe_history already populates every
+    generation -- renders sensibly even when all three measures are disabled for this run
+    (then the event markers/reference lines just never appear, which is itself informative)."""
+    generations = np.array(pgpe_history["generation"])
+    fitness_max = np.array(pgpe_history["fitness_max"])
+    fitness_mean = np.array(pgpe_history["fitness_mean"])
+    stdev_mean = np.array(pgpe_history["stdev_mean"])
+    generations_since_improvement = np.array(pgpe_history["generations_since_improvement"])
+    restart_triggered = np.array(pgpe_history["restart_triggered"], dtype=bool)
+    center_perturbed = np.array(pgpe_history["center_perturbed"], dtype=bool)
+
+    figure, axes = plt.subplots(nrows=3, ncols=1, figsize=(13, 10), dpi=PLOT_DPI, sharex=True)
+
+    # ---- panel 1: fitness vs. restart/perturb events ----
+    axis = axes[0]
+    axis.plot(generations, fitness_max, color="#3D405B", linewidth=2.0, label="fitness_max")
+    axis.plot(generations, fitness_mean, color="#81B29A", linewidth=1.2, label="fitness_mean")
+    for gen in generations[restart_triggered]:
+        axis.axvline(gen, color="#E07A5F", alpha=0.55, linewidth=1.0)
+    for gen in generations[center_perturbed]:
+        axis.axvline(gen, color="#888888", alpha=0.35, linewidth=0.6)
+    axis.set_title(f"{RUN_NAME} ({RUN_TIMESTAMP}): fitness vs. restart/perturb events", loc="left")
+    axis.set_ylabel("Fitness")
+    axis.grid(True, alpha=0.2)
+    axis.legend()
+
+    # ---- panel 2: stdev_mean vs. configured floor (reference line only if the floor is
+    # actually enabled for this run -- drawing it at a placeholder value would mislead) ----
+    axis = axes[1]
+    axis.plot(generations, stdev_mean, color="#3D405B", linewidth=2.0)
+    y_upper = stdev_mean.max()
+    if PGPE_STDEV_MIN_ENABLED:
+        axis.axhline(PGPE_STDEV_MIN, color="#888888", linewidth=1.2, linestyle="--", label=f"configured floor ({PGPE_STDEV_MIN})")
+        y_upper = max(y_upper, PGPE_STDEV_MIN)
+        axis.legend()
+    axis.set_ylim(0, y_upper * 1.1)
+    axis.set_title("Search-distribution stdev vs. configured floor")
+    axis.set_ylabel("stdev")
+    axis.grid(True, alpha=0.2)
+
+    # ---- panel 3: stagnation counter + when each measure fired (same "skip the reference
+    # line if disabled" reasoning as panel 2 applies to the patience line here) ----
+    axis = axes[2]
+    axis.plot(generations, generations_since_improvement, color="#3D405B", linewidth=1.5, label="generations_since_improvement")
+    if PGPE_RESTART_ENABLED:
+        axis.axhline(PGPE_RESTART_PATIENCE, color="#888888", linewidth=1.2, linestyle=":", label=f"patience ({PGPE_RESTART_PATIENCE})")
+    if restart_triggered.any():
+        axis.scatter(generations[restart_triggered], np.full(restart_triggered.sum(), -1.0), color="#E07A5F", s=20, label="restart")
+    if center_perturbed.any():
+        axis.scatter(generations[center_perturbed], np.full(center_perturbed.sum(), -2.5), color="#888888", s=20, marker="|", label="perturb")
+    y_upper = PGPE_RESTART_PATIENCE + 2 if PGPE_RESTART_ENABLED else int(generations_since_improvement.max()) + 2
+    axis.set_ylim(-4, y_upper)
+    axis.set_xlabel("Generation")
+    axis.set_ylabel("Generations since improvement")
+    axis.grid(True, alpha=0.2)
+    axis.legend()
+
+    figure.tight_layout()
+    figure.savefig(_prefixed_path(plot_dir, PGPE_STAGNATION_FILENAME))
+    plt.close(figure)
+
+    write_csv(_prefixed_path(plot_dir, PGPE_STAGNATION_CSV_FILENAME), _columns_to_rows({
+        "generation": generations, "fitness_max": fitness_max, "fitness_mean": fitness_mean, "stdev_mean": stdev_mean,
+        "generations_since_improvement": generations_since_improvement,
+        "restart_triggered": pgpe_history["restart_triggered"], "center_perturbed": pgpe_history["center_perturbed"],
     }))
 
 
@@ -1095,6 +1170,7 @@ def _save_all_plots_and_results(searcher, history, pgpe_history):
     _save_sensory_cue_plot(RUN_DIR, tracked_records)
     _save_pgpe_params_plot(RUN_DIR, pgpe_history)
     _save_pgpe_fitness_plot(RUN_DIR, pgpe_history)
+    _save_pgpe_stagnation_plot(RUN_DIR, pgpe_history)
 
     run_metadata = {
         "run_name": RUN_NAME,
