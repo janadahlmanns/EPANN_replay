@@ -104,7 +104,7 @@ DONE_SUBFOLDER = "done"  # finished configs get moved to <BATCH_FOLDER>/done/ --
                           # rerun of run_batch.py over the same folder from reprocessing them
 
 RUNTIME_LOG_HEADER = [
-    "config", "n_neurons", "chain", "n_chains", "runtime_seconds", "generations_run",
+    "config", "n_neurons", "popsize", "chain", "n_chains", "runtime_seconds", "generations_run",
     "seconds_per_generation", "seconds_per_parallel_generation",
 ]
 
@@ -190,32 +190,44 @@ _LOG_LOCK = threading.Lock()  # guards RUNTIME_LOG_PATH -- multiple chains can f
                                # to the same shared csv at nearly the same moment
 
 
+def _run_dir_pattern(config_stem):
+    """Matches exactly "<config_stem>_<timestamp>" where timestamp is run_evolution.py's
+    RUN_TIMESTAMP format (YYYYMMDD-HHMMSS). Anchored (fullmatch) and exact-length so a
+    config stem that's a prefix of ANOTHER config's stem -- e.g. "param_test" vs
+    "param_test_cosyne" -- can't have its glob swallow that other config's run folder;
+    a loose f"{config_stem}_*" glob would match "param_test_cosyne_20260825-140225"
+    too, since it also starts with "param_test_"."""
+    return re.compile(rf"^{re.escape(config_stem)}_\d{{8}}-\d{{6}}$")
+
+
 def _find_run_dir(config_stem, search_root):
     """Find the (single) timestamped result folder run_evolution.py creates for this
     config, or None if it doesn't exist (yet, or ever -- e.g. that config's run
     crashed). Sorts lexicographically and takes the last match so a leftover folder
     from a previous batch under the same experiment name can't get picked over this
     run's fresh one (timestamp format is lexicographically sortable)."""
-    matches = sorted(search_root.glob(f"{config_stem}_*"))
+    pattern = _run_dir_pattern(config_stem)
+    matches = sorted(path for path in search_root.glob(f"{config_stem}_*") if pattern.fullmatch(path.name))
     return matches[-1] if matches else None
 
 
 def _read_run_metadata(run_dir, config_stem):
-    """Reads generations_run and n_neurons from this run's own h5 file, in one open.
+    """Reads generations_run, n_neurons, and search_popsize from this run's own h5 file, in one open.
     generations_run: how many generations history/reward_evolution/generation actually
     recorded -- may be less than the config's num_generations if an early-termination
     criterion fired (see sim_core/fitness.py). n_neurons: read from the saved config's
     attrs (meta/config), not the original config file, so it's tied to exactly what
-    this run used. Both are cheap/small reads, not the whole h5 file (which can be
+    this run used. search_popsize: read from the saved config's attrs (meta/config), not the original config file, so it's tied to exactly what this run used. All are cheap/small reads, not the whole h5 file (which can be
     large once tracked-generation snapshots are included)."""
     h5_path = run_dir / results_filename(config_stem)
     with h5py.File(h5_path, "r") as h5_file:
         generations_run = h5_file["history/reward_evolution/generation"].shape[0]
         n_neurons = int(h5_file["meta/config"].attrs["n_neurons"])
-    return generations_run, n_neurons
+        search_popsize = int(h5_file["meta/config"].attrs["search_popsize"])
+    return generations_run, n_neurons, search_popsize
 
 
-def _log_runtime(config_path, n_neurons, chain_idx, runtime_seconds, generations_run):
+def _log_runtime(config_path, n_neurons, search_popsize, chain_idx, runtime_seconds, generations_run):
     """Append one row to RUNTIME_LOG_PATH for this config's completed run. Writes the
     header only the first time this particular log file is created. The lock only
     protects against this one process's own chains racing each other -- a different
@@ -241,7 +253,7 @@ def _log_runtime(config_path, n_neurons, chain_idx, runtime_seconds, generations
             if write_header:
                 writer.writerow(RUNTIME_LOG_HEADER)
             writer.writerow([
-                config_path.stem, n_neurons, chain_idx, RUN_IN_PARALLEL,
+                config_path.stem, n_neurons, search_popsize, chain_idx, RUN_IN_PARALLEL,
                 round(runtime_seconds), generations_run, round(seconds_per_generation, 2),
                 round(seconds_per_parallel_generation, 3),
             ])
@@ -323,8 +335,8 @@ def _run_chain(chain_idx, chain_config_paths, config_paths, group_of):
         runtime_seconds = time.monotonic() - tick
         print(f"CHAIN {chain_idx}: processed {config_path.name} in {_format_duration(runtime_seconds)}")
         run_dir = _find_run_dir(config_path.stem, _group_output_root(group_key))
-        generations_run, n_neurons = _read_run_metadata(run_dir, config_path.stem)
-        _log_runtime(config_path, n_neurons, chain_idx, runtime_seconds, generations_run)
+        generations_run, n_neurons, search_popsize = _read_run_metadata(run_dir, config_path.stem)
+        _log_runtime(config_path, n_neurons, search_popsize, chain_idx, runtime_seconds, generations_run)
         _mark_config_done(config_path)
         _maybe_plot_group(group_key, group_of, config_paths)
 
