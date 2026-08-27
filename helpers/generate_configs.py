@@ -21,16 +21,18 @@ import random
 # ==== 2. CONSTANTS / USER INPUTS ============================================
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 OUTPUT_FOLDER = PROJECT_ROOT / "configs" / "generated_sweep"
-FILENAME_PREFIX = "test _"   # files are named f"{FILENAME_PREFIX}{combo_slug}_{i}.json"
+FILENAME_PREFIX = "reward_sweep"   # files are named f"{FILENAME_PREFIX}{combo_slug}_{i}.json"
 
 # Parameters to sweep -- the cartesian product of every list below becomes one
 # parameter combination (one "group" of N_CONFIGS_PER_GROUP configs). Keys must
 # match BASE_CONFIG keys; add/remove sweep params freely, this file doesn't need
 # any other changes to keep working.
 SWEEP_PARAMS = {
-    "cosyne_mutation_stdev": [0.3, 0.9],
-    "cosyne_tournament_size": [4, 12, 25],
-    "search_popsize": [50,200],
+    "big_reward": [0, 1.0],
+    "small_reward": [-1.0, -0.5, 0, 0.5],
+    "crash_penalty": [-1.0, -0.5, 0],
+    "turn_reward_big": [0, 0.5, 1.0],
+    "turn_reward_small": [-1.0, -0.5, 0, 0.5, 1.0],
 }
 
 N_CONFIGS_PER_GROUP = 10   # number of seeded configs generated per parameter combination
@@ -75,7 +77,7 @@ BASE_CONFIG = {
     # smaller population of literally-persisting individuals) 
     "es_method": "cosyne",
     "num_generations": 300,
-    "search_popsize": 200,  
+    "search_popsize": 400,  
 
     # ---- PGPE hyperparameters 
     # "radius_init": 200,
@@ -93,12 +95,12 @@ BASE_CONFIG = {
     # "pgpe_perturb_seed": 12345,
 
     # ---- Cosyne hyperparameters (see runners/run_evolution.py). 
-    "cosyne_tournament_size": 12,
-    "cosyne_mutation_stdev": 0.9,
+    "cosyne_tournament_size": 10,
+    "cosyne_mutation_stdev": 0.75,
     "cosyne_mutation_probability": None,
     "cosyne_permute_all": True,
     "cosyne_num_elites": None,
-    "cosyne_elitism_ratio": 0.1,
+    "cosyne_elitism_ratio": 0.05,
     "cosyne_eta": None,
     "cosyne_num_children": None,
     "cosyne_initial_bounds_low": -0.3,
@@ -106,10 +108,10 @@ BASE_CONFIG = {
 
     # ---- general experiment parameters ----
     "n_neurons": 15,
-    "evo_context_cues_on": False,
+    "evo_context_cues_on": True,
     "evo_sensory_cues_on": True,
     "evo_plasticity_on": True,
-    "paradigm": "trainA, 50, replay, 10, trainB, 50",
+    "paradigm": "trainA, 20",
     "dt": 0.2,
     "tau": 1.0,
     "noise_std": 0.1,

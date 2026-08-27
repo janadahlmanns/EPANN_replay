@@ -43,7 +43,7 @@ from analysis.results_io import results_filename
 from sim_core import constants
 from sim_core.genome_codec import sample_initial_weights
 from sim_core.maze_task import simulate_training_phase
-from sim_core.paradigm import PHASE_REPLAY, PHASE_TRAIN_A, PHASE_TRAIN_B, parse_paradigm
+from sim_core.paradigm import PHASE_REPLAY, PHASE_TRAIN_A, PHASE_TRAIN_B, parse_paradigm_variants
 from sim_core.replay_task import simulate_replay_phase
 
 # ==== 2) CONSTANTS / USER INPUTS =================================================
@@ -252,7 +252,12 @@ constants.configure(
 if not CONFIG["evo_plasticity_on"]:
     GENOME["eta"] = torch.zeros_like(GENOME["eta"])
 
-PARADIGM_PHASES = parse_paradigm(CONFIG["paradigm"])
+# This one genome is one individual, so it only ever ran ONE paradigm variant during its
+# own evolution -- but this recording script has no way to know which one it actually
+# drew (evaluate_generation's per-individual draw isn't saved anywhere), so it always
+# replays variant 0. That's the only variant that exists for a single-paradigm config
+# (the common case, unaffected), and a fair stand-in otherwise.
+PARADIGM_PHASES = parse_paradigm_variants(CONFIG["paradigm"])[0]
 GENOME_BATCHED = {name: tensor.unsqueeze(0).to(DEVICE) for name, tensor in GENOME.items()}
 
 noise_generator = torch.Generator(device=DEVICE)

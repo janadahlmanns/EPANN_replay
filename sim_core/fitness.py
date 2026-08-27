@@ -477,6 +477,7 @@ def _record_history(
     weights_start_cpu,
     weights_end_cpu,
     tracking,
+    variant_idx_cpu,
 ):
     fit_cpu = regularized_fitness.detach().cpu()
     tr_cpu = training_reward.detach().cpu()
@@ -511,6 +512,10 @@ def _record_history(
             "big_reward_by_run": tracking["big_reward_by_run"].detach().cpu().clone(),
             "sensory_cue_by_run": tracking["sensory_cue_by_run"].detach().cpu().clone(),
             "correct_arm_by_run": tracking["correct_arm_by_run"].detach().cpu().clone(),
+            # which paradigm variant each individual (row) drew this generation -- one entry
+            # per individual, not per run (see evaluate_generation's variant_idx); run_evolution.py's
+            # input-distributions plot only uses this when there's more than one variant to begin with
+            "paradigm_variant_by_individual": variant_idx_cpu.clone(),
         }
     )
 
@@ -614,7 +619,76 @@ def _run_paradigm(genome, paradigm_phases, device, noise_generator, reward_gener
     return state, W, training_reward, replay_reward, tracking, training_reward_by_task, checkpoint_after_task
 
 
-def _measure_cue_importance(genome, paradigm_phases, device, test_generator,
+def _run_paradigm_per_individual(genome, paradigm_variants, variant_idx, device, noise_generator,
+                                  reward_generator, collect_tracking, context_cues_on, sensory_cues_on,
+                                  reward_cues_on, state, W):
+    """Like _run_paradigm, but each individual (row) runs its OWN paradigm variant --
+    variant_idx[row] (values 0..len(paradigm_variants)-1) selects which entry of
+    paradigm_variants that individual drew (see evaluate_generation; variant_idx is
+    all-zeros -- one variant for the whole population -- whenever this run's config only
+    has one paradigm). Every variant is required to have the identical (phase, VALUE)
+    shape (see paradigm.parse_paradigm_variants), so every output tensor below has the
+    same fixed shape no matter how the population's variant draw came out.
+
+    Splits the population into one GPU sub-batch per DISTINCT variant actually drawn
+    this call (boolean mask, no Python-level per-individual loop), runs _run_paradigm on
+    each sub-batch with that variant's own phase list, and scatters every result back
+    into full-population-sized tensors at the original row positions. Total compute is
+    the same order as a single fused call over the whole population would have been (sum
+    over variants of sub_pop * that variant's tick count) -- this never leaves the GPU,
+    it just replaces one fused call with len(paradigm_variants) sequential vectorized
+    calls (typically a handful)."""
+    pop = state.shape[0]
+    state_final = torch.empty_like(state)
+    W_final = torch.empty_like(W)
+    training_reward = torch.empty(pop, device=device)
+    replay_reward = torch.empty(pop, device=device)
+    training_reward_by_task = {}
+    checkpoint_after_task = {}
+    tracking = None
+
+    for variant, paradigm_phases in enumerate(paradigm_variants):
+        rows = torch.where(variant_idx == variant)[0]
+        if rows.numel() == 0:
+            continue
+
+        sub_genome = {name: tensor[rows] for name, tensor in genome.items()}
+        (
+            sub_state_final, sub_W_final, sub_training_reward, sub_replay_reward,
+            sub_tracking, sub_training_reward_by_task, sub_checkpoint_after_task,
+        ) = _run_paradigm(
+            sub_genome, paradigm_phases, device, noise_generator, reward_generator, collect_tracking,
+            context_cues_on, sensory_cues_on, reward_cues_on, state[rows], W[rows],
+        )
+
+        state_final[rows] = sub_state_final
+        W_final[rows] = sub_W_final
+        training_reward[rows] = sub_training_reward
+        replay_reward[rows] = sub_replay_reward
+
+        for phase_type, reward_by_task in sub_training_reward_by_task.items():
+            training_reward_by_task.setdefault(phase_type, torch.zeros(pop, device=device))[rows] = reward_by_task
+
+        for phase_type, (chk_state, chk_W) in sub_checkpoint_after_task.items():
+            full_state, full_W = checkpoint_after_task.setdefault(
+                phase_type, (torch.zeros_like(state), torch.zeros_like(W))
+            )
+            full_state[rows] = chk_state
+            full_W[rows] = chk_W
+
+        if collect_tracking:
+            if tracking is None:
+                tracking = {
+                    key: torch.zeros((pop,) + value.shape[1:], dtype=value.dtype, device=value.device)
+                    for key, value in sub_tracking.items()
+                }
+            for key, value in sub_tracking.items():
+                tracking[key][rows] = value
+
+    return state_final, W_final, training_reward, replay_reward, tracking, training_reward_by_task, checkpoint_after_task
+
+
+def _measure_cue_importance(genome, paradigm_variants, variant_idx, device, test_generator,
                              context_cues_on, sensory_cues_on, state_checkpoint, W_checkpoint):
     """Ablation importance: reward lost when one cue channel is clipped to zero,
     measured by continuing the SAME paradigm shape once more from the real
@@ -637,8 +711,8 @@ def _measure_cue_importance(genome, paradigm_phases, device, test_generator,
 
     def _probe(probe_context_cues_on, probe_sensory_cues_on, probe_reward_cues_on):
         test_generator.set_state(checkpoint_rng_state)
-        _, _, probe_training_reward, probe_replay_reward, _, _, _ = _run_paradigm(
-            genome, paradigm_phases, device, test_generator, test_generator, False,
+        _, _, probe_training_reward, probe_replay_reward, _, _, _ = _run_paradigm_per_individual(
+            genome, paradigm_variants, variant_idx, device, test_generator, test_generator, False,
             probe_context_cues_on, probe_sensory_cues_on, probe_reward_cues_on,
             state_checkpoint, W_checkpoint,
         )
@@ -653,6 +727,18 @@ def _measure_cue_importance(genome, paradigm_phases, device, test_generator,
     sensory_importance = baseline_reward - sensory_ablated_reward
     reward_importance = baseline_reward - reward_ablated_reward
     return context_importance, sensory_importance, reward_importance
+
+
+def paradigm_has_multiple_training_tasks(paradigm_phases):
+    """True when paradigm_phases has at least two DISTINCT training task types -- the
+    minimum FWT/BWT (_measure_transfer_metrics) needs (see _training_task_order). A
+    single-training-task paradigm (whether that task appears once or is split across
+    several occurrences, e.g. by a replay bout in between) has no transfer to measure --
+    callers use this to skip transfer-metric tracking entirely for such a paradigm
+    instead of hitting _training_task_order's loud ValueError, which stays reserved for
+    the genuinely ambiguous case (two-or-more distinct tasks where one repeats)."""
+    task_types = [phase_type for phase_type, _ in paradigm_phases if phase_type in PHASE_CONTEXT]
+    return len(set(task_types)) >= 2
 
 
 def _training_task_order(paradigm_phases):
@@ -763,7 +849,7 @@ def _measure_transfer_metrics(genome, device, test_generator, context_cues_on, s
 # ==== 7) FITNESS EVALUATION =====================================================
 def evaluate_generation(genome_flat, device, noise_generator, reward_generator, test_generator,
                          weight_init_generator, l1_lambda, context_cues_on, sensory_cues_on,
-                         evo_plasticity_on, paradigm_phases):
+                         evo_plasticity_on, paradigm_variants, paradigm_generator):
     evaluation_idx = len(_REWARD_EVOLUTION["generation"]) + 1
     should_print = _should_print(evaluation_idx)
 
@@ -776,10 +862,27 @@ def evaluate_generation(genome_flat, device, noise_generator, reward_generator, 
     # fresh initial weights every lifetime -- NOT read from the genome, see genome_codec.py
     W_init = sample_initial_weights(pop, device, weight_init_generator)
 
+    # Which paradigm variant each individual gets, redrawn fresh every generation --
+    # no coordination within OR across generations is needed (see paradigm.parse_paradigm_variants),
+    # so this is simply "at birth" for every individual regardless of es_method: a freshly
+    # sampled PGPE individual is genuinely born this generation, and a persisting Cosyne
+    # individual doesn't need its paradigm to stay the same across its lifetime either.
+    # All-zeros (skip the draw, no dedicated RNG stream needed) when there's only one
+    # variant -- the overwhelmingly common case -- so single-paradigm runs/configs are
+    # completely unaffected, including their RNG consumption.
+    if len(paradigm_variants) == 1:
+        variant_idx = torch.zeros(pop, dtype=torch.long, device=device)
+    else:
+        variant_idx = torch.randint(0, len(paradigm_variants), (pop,), generator=paradigm_generator, device=device)
+    representative_paradigm_phases = paradigm_variants[0]  # structural stand-in for printing/task-order
+    # purposes only -- every variant has the identical (phase, VALUE) shape by construction,
+    # so positions/run-counts read off this one are correct for the whole population even
+    # though its phase TYPE labels may not describe every individual's actual variant
+
     frob_start = torch.linalg.matrix_norm(W_init, ord="fro", dim=(1, 2))
     state0 = torch.zeros(pop, constants.N, device=device)
-    state_final, W_final, training_reward, replay_reward, tracking, training_reward_by_task, checkpoint_after_task = _run_paradigm(
-        genome, paradigm_phases, device, noise_generator, reward_generator, should_print,
+    state_final, W_final, training_reward, replay_reward, tracking, training_reward_by_task, checkpoint_after_task = _run_paradigm_per_individual(
+        genome, paradigm_variants, variant_idx, device, noise_generator, reward_generator, should_print,
         context_cues_on, sensory_cues_on, True, state0, W_init,  # reward cue is always on
         # during real evolution -- ablating it is only ever a diagnostic probe, see
         # _measure_cue_importance, not an evolutionary condition (no evo_reward_cues_on exists)
@@ -800,7 +903,7 @@ def evaluate_generation(genome_flat, device, noise_generator, reward_generator, 
             l1_penalty.detach().cpu(),
             regularized_fitness.detach().cpu(),
             tracking,
-            paradigm_phases,
+            representative_paradigm_phases,
         )
         _record_history(
             evaluation_idx,
@@ -812,20 +915,27 @@ def evaluate_generation(genome_flat, device, noise_generator, reward_generator, 
             W_init.detach().cpu(),
             W_final.detach().cpu(),
             tracking,
+            variant_idx.detach().cpu(),
         )
         context_importance, sensory_importance, reward_importance = _measure_cue_importance(
-            genome, paradigm_phases, device, test_generator,
+            genome, paradigm_variants, variant_idx, device, test_generator,
             context_cues_on, sensory_cues_on, state_final, W_final,
         )
         _record_cue_importance(evaluation_idx, context_importance, sensory_importance, reward_importance)
 
-        task_order = _training_task_order(paradigm_phases)
-        transfer_metrics = _measure_transfer_metrics(
-            genome, device, test_generator, context_cues_on, sensory_cues_on,
-            state0, W_init, checkpoint_after_task, state_final, W_final,
-            task_order, training_reward_by_task,
-        )
-        _record_transfer_metrics(evaluation_idx, transfer_metrics)
+        # Single-training-task paradigms have no transfer to measure -- skip rather
+        # than hit _training_task_order's loud ValueError, see paradigm_has_multiple_training_tasks.
+        # (Safe to read off representative_paradigm_phases alone: whenever transfer metrics
+        # are actually wanted, run_evolution.py requires every variant to share the same
+        # task-type sequence, not just the same shape -- see its HAS_TRANSFER_METRICS check.)
+        if paradigm_has_multiple_training_tasks(representative_paradigm_phases):
+            task_order = _training_task_order(representative_paradigm_phases)
+            transfer_metrics = _measure_transfer_metrics(
+                genome, device, test_generator, context_cues_on, sensory_cues_on,
+                state0, W_init, checkpoint_after_task, state_final, W_final,
+                task_order, training_reward_by_task,
+            )
+            _record_transfer_metrics(evaluation_idx, transfer_metrics)
     else:
         fit_cpu = regularized_fitness.detach().cpu()
         print(f"CHAIN {_CHAIN_LABEL} - iter {evaluation_idx} - best: {float(fit_cpu.max()):.1f} - median: {float(fit_cpu.median()):.1f}")
@@ -839,6 +949,7 @@ def evaluate_generation(genome_flat, device, noise_generator, reward_generator, 
             None,
             None,
             None,
+            variant_idx.detach().cpu(),
         )
 
     return regularized_fitness
@@ -846,8 +957,8 @@ def evaluate_generation(genome_flat, device, noise_generator, reward_generator, 
 
 def fitness_function(genome_flat, device, noise_generator, reward_generator, test_generator,
                       weight_init_generator, l1_lambda, context_cues_on, sensory_cues_on,
-                      evo_plasticity_on, paradigm_phases):
+                      evo_plasticity_on, paradigm_variants, paradigm_generator):
     """Vectorized EvoTorch objective entrypoint."""
     return evaluate_generation(genome_flat, device, noise_generator, reward_generator, test_generator,
                                 weight_init_generator, l1_lambda, context_cues_on, sensory_cues_on,
-                                evo_plasticity_on, paradigm_phases)
+                                evo_plasticity_on, paradigm_variants, paradigm_generator)
