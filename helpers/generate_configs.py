@@ -126,6 +126,17 @@ BASE_CONFIG = {
     "turn_reward_small": 0.0,
     "l1_lambda": 0.001,
 
+    # ---- Hebbian plasticity cadence/averaging/bound (see sim_core/constants.py's
+    # TAU_HEBB_MULT/MA_SPAN/WEIGHT_CLAMP) -- replaces the old unconditional-every-tick,
+    # unbounded weight update, which let W's Frobenius norm explode by several orders of
+    # magnitude within a single lifetime. 1/1/5.0 is the smallest change from the
+    # original disabled-clamp behavior that was actually tested (every tick, instantaneous
+    # state, clip-only-when-exceeding at 5.0) -- not yet a tuned choice, just a sane
+    # starting point pending a proper sweep over these three.
+    "tau_hebb_mult": 1,
+    "ma_span": 1,
+    "weight_clamp": 5.0,
+
     # ---- anything else (tracking/plot cadence) ----
     "tracked_per_interval": 40,
     "max_networks_preview": 6,

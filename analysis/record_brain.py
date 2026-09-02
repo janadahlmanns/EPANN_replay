@@ -142,17 +142,19 @@ def _plot_run(stem, output_dir, maze_idx, phase_type, run_idx, ticks):
     # equal-width columns across every row (no per-row colorbar eating into one row's
     # width, which is what threw the columns out of alignment) -- the colorbar is
     # instead one full-width horizontal axis at the bottom, next to the cue-summary row.
-    # One shared scale for both W and activation, always exactly [-1, 1]: W is
-    # renormalized to max-abs-1 every tick (see maze_task.py's plasticity_step call
-    # site), and activation is a state/tanh(...) blend that stays within [-1, 1] as
-    # long as dt/tau <= 1 (true for every config so far).
+    # activation's scale is always exactly [-1, 1] (state is a state/tanh(...) blend that
+    # stays within [-1, 1] as long as dt/tau <= 1, true for every config so far). W's
+    # scale uses constants.WEIGHT_CLAMP instead -- the clip-only-when-exceeding clamp in
+    # maze_task.py/replay_task.py's tick loops guarantees max|W| <= WEIGHT_CLAMP (once at
+    # least one Hebbian update has applied), not exactly 1 like the old unconditional
+    # every-tick renormalization did.
     figure = plt.figure(figsize=(2.6 * n_ticks, 9.7), dpi=PLOT_DPI)
     grid = figure.add_gridspec(nrows=5, ncols=n_ticks, height_ratios=[4, 1, 1, 0.3, 0.6], hspace=0.9)
 
     im = None
     for col, tick in enumerate(ticks):
         w_axis = figure.add_subplot(grid[0, col])
-        im = w_axis.imshow(tick["W"], cmap=HEATMAP_CMAP, vmin=-1.0, vmax=1.0, aspect="equal")
+        im = w_axis.imshow(tick["W"], cmap=HEATMAP_CMAP, vmin=-constants.WEIGHT_CLAMP, vmax=constants.WEIGHT_CLAMP, aspect="equal")
         w_axis.set_title(f"tick {tick['step_in_run']} ({TICK_LABELS[tick['step_in_run']]})", fontsize=9)
         w_axis.set_xticks(neuron_ids)
         w_axis.set_yticks(neuron_ids)
@@ -244,6 +246,8 @@ constants.configure(
     straight_thresh=CONFIG["straight_thresh"], big_reward=CONFIG["big_reward"],
     small_reward=CONFIG["small_reward"], crash_penalty=CONFIG["crash_penalty"],
     turn_reward_big=CONFIG["turn_reward_big"], turn_reward_small=CONFIG["turn_reward_small"],
+    tau_hebb_mult=CONFIG["tau_hebb_mult"], ma_span=CONFIG["ma_span"],
+    weight_clamp=CONFIG["weight_clamp"],
 )
 
 # replicate fitness.py's evaluate_generation exactly: eta is forced to zero when

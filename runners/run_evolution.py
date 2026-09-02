@@ -331,6 +331,9 @@ constants.configure(
     crash_penalty=CONFIG["crash_penalty"],
     turn_reward_big=CONFIG["turn_reward_big"],
     turn_reward_small=CONFIG["turn_reward_small"],
+    tau_hebb_mult=CONFIG["tau_hebb_mult"],
+    ma_span=CONFIG["ma_span"],
+    weight_clamp=CONFIG["weight_clamp"],
 )
 
 GENOME_SPEC = genome_codec.genome_spec()

@@ -32,6 +32,8 @@ Reward schedule (see constants.py "TUNABLE SIMULATION CONSTANTS" section for the
     and a run that crashes before ever turning only pays CRASH_PENALTY.
 """
 
+import collections
+
 import torch
 from sim_core import constants
 from sim_core.constants import N_INPUT, OUTPUT_IDX, TICKS_PER_RUN
@@ -158,6 +160,14 @@ def simulate_training_phase(state, W, M, A, B, C, D, beta, eta,
         }
         tracking["sensory_cue_by_run"][:, 0] = (sensory_b > 0.5).long()
 
+    # Hebbian update cadence/averaging (see constants.py's TAU_HEBB_MULT/MA_SPAN/
+    # WEIGHT_CLAMP and ctrnn.py's plasticity_step) -- both reset fresh at the start
+    # of every phase call, same precedent as recent_reward above; they do NOT carry
+    # over across the trainA -> replay -> trainB phase boundary (see fitness.py's
+    # _run_paradigm, which only threads state/W between phases).
+    pre_post_buffer = collections.deque(maxlen=constants.MA_SPAN)
+    tick_idx = 0
+
     for _ in range(max_ticks):
         active = run_count < num_runs
         if not torch.any(active):
@@ -181,12 +191,24 @@ def simulate_training_phase(state, W, M, A, B, C, D, beta, eta,
              input_reward], dim=1,
         )
 
-        # --- CTRNN tick: clamp inputs, advance state, apply plasticity ---
+        # --- CTRNN tick: clamp inputs, advance state (every tick, never throttled) ---
         state[:, :N_INPUT] = input_vec
         new_state = activation_step(state, W, beta, constants.NOISE_STD, noise_generator)
-        dW = plasticity_step(state, W, M, A, B, C, D, eta)
-        W = W + dW
-        # W = W / W.abs().amax(dim=(1, 2), keepdim=True).clamp(min=1e-8)
+
+        # --- Hebbian update: gated to every TAU_HEBB_MULT-th tick, fed a moving
+        # average of the last MA_SPAN ticks' state (see constants.py). Only the
+        # weight update is throttled/averaged -- the state dynamics above never are. ---
+        pre_post_buffer.append(state)
+        tick_idx += 1
+        if tick_idx % constants.TAU_HEBB_MULT == 0:
+            pre_post_avg = torch.stack(list(pre_post_buffer), dim=0).mean(dim=0)
+            dW = plasticity_step(state, W, pre_post_avg, pre_post_avg, M, A, B, C, D, eta)
+            W = W + dW
+            # clip-only-when-exceeding: W is left untouched whenever max|W| <= WEIGHT_CLAMP
+            # already; only the overshoot gets compressed back down to the ceiling.
+            clamp_scale = (W.abs().amax(dim=(1, 2), keepdim=True) / constants.WEIGHT_CLAMP).clamp(min=1.0)
+            W = W / clamp_scale
+
         new_state[:, :N_INPUT] = input_vec
         output = new_state[:, OUTPUT_IDX]
 
