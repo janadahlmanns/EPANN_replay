@@ -21,7 +21,7 @@ import random
 # ==== 2. CONSTANTS / USER INPUTS ============================================
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 OUTPUT_FOLDER = PROJECT_ROOT / "configs" / "generated_sweep"
-FILENAME_PREFIX = "reward_sweep"   # files are named f"{FILENAME_PREFIX}{combo_slug}_{i}.json"
+FILENAME_PREFIX = "255_var_"   # files are named f"{FILENAME_PREFIX}{combo_slug}_{i}.json"
 
 # Parameters to sweep -- the cartesian product of every value list below becomes
 # one parameter combination (one "group" of N_CONFIGS_PER_GROUP configs). Keys
@@ -31,14 +31,13 @@ FILENAME_PREFIX = "reward_sweep"   # files are named f"{FILENAME_PREFIX}{combo_s
 # Windows chokes on long paths once several swept params get concatenated
 # together (e.g. "turn_reward_small" -> "t_small").
 SWEEP_PARAMS = {
-    "big_reward": ("L", [0, 1.0]),
-    "small_reward": ("S", [-1.0, -0.5, 0, 0.5]),
-    "crash_penalty": ("x", [-1.0, -0.5, 0]),
-    "turn_reward_big": ("t_L", [0, 0.5, 1.0]),
-    "turn_reward_small": ("t_S", [-1.0, -0.5, 0, 0.5, 1.0]),
+    "tau_hebb_mult": ("tm", [2,3,4]),
+    "ma_span": ("ma", [2,3,4,5,6,7,8]),
+    "weight_clamp": ("wc", [4.0, 4.5, 5.0, 5.5, 6.0]),
+    
 }
 
-N_CONFIGS_PER_GROUP = 2   # number of seeded configs generated per parameter combination
+N_CONFIGS_PER_GROUP = 10   # number of seeded configs generated per parameter combination
 
 # ---- seeds: same 5 seed types as generate_configs.py. One list per type is
 # generated per SEED_MODE below, each of length
@@ -79,7 +78,7 @@ BASE_CONFIG = {
     # from one shared search distribution every generation; Cosyne maintains a much
     # smaller population of literally-persisting individuals) 
     "es_method": "cosyne",
-    "num_generations": 160,
+    "num_generations": 500,
     "search_popsize": 400,  
 
     # ---- PGPE hyperparameters 
@@ -133,12 +132,12 @@ BASE_CONFIG = {
     # original disabled-clamp behavior that was actually tested (every tick, instantaneous
     # state, clip-only-when-exceeding at 5.0) -- not yet a tuned choice, just a sane
     # starting point pending a proper sweep over these three.
-    "tau_hebb_mult": 1,
-    "ma_span": 1,
+    "tau_hebb_mult": 2,
+    "ma_span": 5,
     "weight_clamp": 5.0,
 
     # ---- anything else (tracking/plot cadence) ----
-    "tracked_per_interval": 40,
+    "tracked_per_interval": 100,
     "max_networks_preview": 6,
     "max_runs_preview": 20,
     "hist_bin_width": 1,

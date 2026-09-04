@@ -6,6 +6,12 @@ Usage: python run_evolution.py <config_name> <experiment_name> <device> <chain_l
 chain_label is just a display label for terminal output (run_batch.py passes its chain
 index; a manual run can pass anything, e.g. "manual").
 
+Output is written under the local data_temp/ (see DATA_ROOT below) while this run is actively
+creating files, then this run's own finished output folder is published - moved as one
+already-complete unit - into data/ (DESTINATION_ROOT) as the very last step, same behavior
+whether this script is run manually/standalone or via run_batch.py. See DESTINATION_ROOT /
+_publish_run_dir below.
+
 early_termination_enabled is exactly "True" or "False" (fails loudly on anything else -
 argv values are always strings, so this project's style forbids silently guessing what a
 different value would mean). When "True" (the normal case): on a detailed-print
@@ -31,7 +37,8 @@ import datetime
 import functools
 import json
 import shutil
-import sys 
+import sys
+import time
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -75,14 +82,26 @@ from sim_core.fitness import (
 from sim_core.paradigm import PHASE_REPLAY, parse_paradigm_variants
 
 # ==== 2) CONFIG LOADING + OUTPUT LOCATION =======================================
-# Results always live under the hardcoded DATA_ROOT - not a user choice. The
-# config is found by joining CONFIGS_ROOT with the given name + ".json" - that's
-# it, nothing else: for a plain name that's configs/<name>.json; run_batch.py
+# A run's output is written under DATA_ROOT while it's actively being created, then this
+# run's own finished RUN_DIR is moved (as one already-complete unit) into DESTINATION_ROOT
+# right at the end - see _publish_run_dir. DATA_ROOT is a plain LOCAL folder, deliberately
+# not DESTINATION_ROOT (the synced folder, e.g. FAUbox, results are meant to end up in):
+# writing straight into a synced folder while dozens of files are still being created for
+# one run raced with the sync client's own filesystem filter driver often enough to
+# intermittently corrupt output (empty or half-written run folders). Neither is a user
+# choice. The config is found by joining CONFIGS_ROOT with the given name + ".json" -
+# that's it, nothing else: for a plain name that's configs/<name>.json; run_batch.py
 # reaches configs/batch_to_run/<name>.json the same way, by passing
 # "batch_to_run/<name>" as that same argument. No defaults/fallbacks on the
 # config contents - a missing or malformed field fails loudly (KeyError), on purpose.
 CONFIGS_ROOT = PROJECT_ROOT / "configs"
-DATA_ROOT = PROJECT_ROOT / "data"
+DATA_ROOT = PROJECT_ROOT / "data_temp"
+DESTINATION_ROOT = PROJECT_ROOT / "data"  # synced folder (e.g. FAUbox) this run's finished
+                                           # output gets published to - see _publish_run_dir
+
+RETRY_ATTEMPTS = 5  # _with_retry: total tries before giving up
+RETRY_DELAY_SECONDS = 2.0  # wait between retries -- long enough for a transient filesystem
+                            # hiccup (e.g. a sync client's filter driver under load) to clear
 
 
 def _parse_bool_arg(value, arg_name):
@@ -103,6 +122,9 @@ if len(sys.argv) != 6:
     )
 CONFIG_PATH = CONFIGS_ROOT / f"{sys.argv[1]}.json"
 OUTPUT_ROOT = DATA_ROOT / sys.argv[2]
+DESTINATION_OUTPUT_ROOT = DESTINATION_ROOT / sys.argv[2]  # where RUN_DIR ends up published -- same
+                                                           # relative "experiment_name" fragment,
+                                                           # just rooted under DESTINATION_ROOT instead
 CHAIN_LABEL = sys.argv[4]  # printed as "CHAIN <label>" in terminal output - run_batch.py passes
                             # its chain index; a manual run can pass anything, e.g. "manual"
 EARLY_TERMINATION_ENABLED = _parse_bool_arg(sys.argv[5], "early_termination_enabled")
@@ -1266,12 +1288,44 @@ def _save_transfer_metrics_plot(plot_dir, transfer_metrics_history):
     write_csv(_prefixed_path(plot_dir, TRANSFER_METRICS_CSV_FILENAME), _columns_to_rows(csv_columns))
 
 
+def _with_retry(operation, description):
+    """Calls the zero-arg operation(), retrying a few times on a transient
+    file-not-found/permission error before giving up and raising for real. Guards
+    against a momentary filesystem hiccup (e.g. a cloud-sync filter driver briefly
+    interfering with a freshly-created/moved path under load) - NOT against the
+    underlying file/folder genuinely being gone, which still fails loudly once
+    retries are exhausted."""
+    for attempt in range(1, RETRY_ATTEMPTS + 1):
+        try:
+            return operation()
+        except (FileNotFoundError, PermissionError):
+            if attempt == RETRY_ATTEMPTS:
+                raise
+            print(f"{description}: transient error on attempt {attempt}/{RETRY_ATTEMPTS}, retrying...")
+            time.sleep(RETRY_DELAY_SECONDS)
+
+
+def _publish_run_dir():
+    """Moves this run's finished, already-complete RUN_DIR (as one unit) from the local
+    DATA_ROOT into DESTINATION_OUTPUT_ROOT (the synced folder, e.g. FAUbox) - the very
+    last thing this script does. Only ever called once RUN_DIR has everything in it (all
+    plots, results h5, config copy), so DESTINATION_OUTPUT_ROOT only ever sees complete
+    run folders land in it, never a partially-written one."""
+    DESTINATION_OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
+    destination_run_dir = DESTINATION_OUTPUT_ROOT / RUN_DIR.name
+    _with_retry(lambda: shutil.move(str(RUN_DIR), str(destination_run_dir)), "publishing run_dir")
+    return destination_run_dir
+
+
 def _save_all_plots_and_results(searcher, history, pgpe_history):
-    """Create RUN_DIR, copy the config file used for this run into it, save all
-    tracking plots, and write the full numeric results (final genomes + history)
-    to RESULTS_FILENAME - all into the one timestamped, collision-proof folder."""
+    """Create RUN_DIR, save all tracking plots and the full numeric results (final
+    genomes + history) to RESULTS_FILENAME, and only THEN copy the config file used
+    for this run in alongside them. That order is deliberate: the config copy is
+    just a bookkeeping convenience, while the plots/results are the actual compute
+    this run exists to produce - so a failure copying the config must never be able
+    to discard real results that were already sitting on disk fine. Finally, publish
+    the whole finished RUN_DIR to DESTINATION_OUTPUT_ROOT (see _publish_run_dir)."""
     RUN_DIR.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(CONFIG_PATH, RUN_DIR / CONFIG_PATH.name)
 
     tracked_generations = history["tracked_generations"]
     tracked_records = history["tracked_records"]
@@ -1321,7 +1375,11 @@ def _save_all_plots_and_results(searcher, history, pgpe_history):
     }
     save_results_h5(RUN_DIR / results_filename(RUN_NAME), CONFIG, run_metadata, searcher, history, pgpe_history)
 
-    print(f"\nSaved plots + results to: {RUN_DIR}")
+    _with_retry(lambda: shutil.copy2(CONFIG_PATH, RUN_DIR / CONFIG_PATH.name), "copying config")
+
+    print(f"\nSaved plots + results locally, publishing to: {DESTINATION_OUTPUT_ROOT / RUN_DIR.name}")
+    published_run_dir = _publish_run_dir()
+    print(f"Published to: {published_run_dir}")
 
 
 # ==== 5) EVOLUTION RUN ==========================================================

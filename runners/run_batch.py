@@ -46,11 +46,28 @@ crash. Once a pass finishes, if config_folder still has .json files left (leftov
 chain skipped, or new ones dropped in mid-run), another pass runs automatically, up to
 MAX_PASSES times, until the folder's empty.
 
-log_name picks which runtime log this invocation appends to: data/runtime_log_<log_name>.csv
-(see _log_runtime). One separate file per machine/GPU on purpose -- data/ is synced (e.g.
-Dropbox) across machines, and multiple machines appending to the SAME synced file is a real
-corruption risk that a same-process lock can't protect against. Every finished config appends
-one row: config name, chain, n_chains, runtime in seconds.
+log_name picks which runtime log this invocation appends to (while the batch is running):
+data_temp/runtime_log_<log_name>.csv (see _log_runtime), published to
+DESTINATION_ROOT/runtime_log_<log_name>.csv only once the whole batch finishes (see
+_publish_to_destination below). One separate file per machine/GPU on purpose -- multiple
+machines appending to the SAME synced file is a real corruption risk that a same-process lock
+can't protect against. Every finished config appends one row: config name, chain, n_chains,
+runtime in seconds.
+
+Each individual run_evolution.py subprocess call writes its own output to a plain LOCAL folder
+(data_temp/, see that script's DATA_ROOT) for as long as it's actively creating files, then
+moves that one finished, already-complete run_dir into DESTINATION_ROOT (data/, the synced
+folder, e.g. FAUbox) itself as its very last step -- see run_evolution.py's docstring. This
+script never sees data_temp/<experiment_name>/ at all: by the time subprocess.run() returns for
+a config, DESTINATION_ROOT/<experiment_name>/ already has that config's finished run_dir in it,
+which is where this script looks for it (_find_run_dir) and where it writes each group's facet
+plots. Only the runtime log is buffered locally by THIS script and merged into DESTINATION_ROOT
+at the very end (_publish_to_destination) -- everything else publishes itself per-run instead.
+This two-step (local folder, then one clean move of the whole finished thing) exists because
+writing straight into a synced folder while dozens of files are still being created for one run
+raced with the sync client's own filesystem filter driver often enough to intermittently corrupt
+output (empty or half-written run folders). The tradeoff: you can no longer watch a run's
+progress live via the sync folder while it's still writing, only once it finishes.
 """
 
 # ==== 1) IMPORTS =================================================================
@@ -89,7 +106,11 @@ from analysis.results_io import load_results_h5, results_filename
 
 # ==== 2) CONSTANTS / USER INPUTS =================================================
 RUN_EVOLUTION_SCRIPT = PROJECT_ROOT / "runners" / "run_evolution.py"
-DATA_ROOT = PROJECT_ROOT / "data"
+DATA_ROOT = PROJECT_ROOT / "data_temp"  # LOCAL folder this script buffers its own runtime log
+                                         # in while the batch runs -- see _publish_to_destination()
+DESTINATION_ROOT = PROJECT_ROOT / "data"  # synced folder (e.g. FAUbox) -- where every run publishes
+                                           # its own finished output straight to (see run_evolution.py),
+                                           # and where the runtime log is published at the very end
 
 ROOT_GROUP_KEY = ""  # sentinel group key for "no subfolder, straight into the experiment root"
 GROUP_STEM_PATTERN = re.compile(r"^(.*)_(\d+)$")  # "<group>_<trailing integer>"
@@ -129,13 +150,17 @@ EXPERIMENT_NAME = sys.argv[2]
 DEVICE = sys.argv[3]  # passed straight through to every run_evolution.py subprocess call
 RUN_IN_PARALLEL = int(sys.argv[4])  # how many config chains to run concurrently -- only raise this if
                                      # you're sure the target machine's GPU has headroom for it
-LOG_NAME = sys.argv[5]  # picks data/runtime_log_<LOG_NAME>.csv -- one file per machine, see docstring
+LOG_NAME = sys.argv[5]  # picks data_temp/runtime_log_<LOG_NAME>.csv -- one file per machine, see docstring
 EARLY_TERMINATION_ENABLED = _parse_bool_arg(sys.argv[6], "early_termination_enabled")  # passed straight
                                      # through to every run_evolution.py subprocess call, see docstring
 
 BATCH_FOLDER = PROJECT_ROOT / "configs" / CONFIG_FOLDER_NAME
 RUNTIME_LOG_PATH = DATA_ROOT / f"runtime_log_{LOG_NAME}.csv"
-OUTPUT_ROOT = DATA_ROOT / EXPERIMENT_NAME
+# Each run_evolution.py subprocess call publishes its OWN finished run_dir straight to
+# DESTINATION_ROOT itself (see run_evolution.py) -- by the time subprocess.run() returns
+# below, that run's folder already lives here, not under DATA_ROOT. So facet-plot output
+# and the _find_run_dir lookups this script does both target DESTINATION_ROOT too.
+OUTPUT_ROOT = DESTINATION_ROOT / EXPERIMENT_NAME
 
 
 # ==== 3) CONFIG GROUPING =========================================================
@@ -325,20 +350,28 @@ def _run_chain(chain_idx, chain_config_paths, config_paths, group_of):
         group_key = group_of[config_path]
         experiment_name = EXPERIMENT_NAME if group_key == ROOT_GROUP_KEY else f"{EXPERIMENT_NAME}/{group_key}"
         tick = time.monotonic()
-        subprocess.run(
-            [
-                sys.executable, str(RUN_EVOLUTION_SCRIPT), config_name, experiment_name, DEVICE, str(chain_idx),
-                str(EARLY_TERMINATION_ENABLED),
-            ],
-            check=True,
-        )
-        runtime_seconds = time.monotonic() - tick
-        print(f"CHAIN {chain_idx}: processed {config_path.name} in {_format_duration(runtime_seconds)}")
-        run_dir = _find_run_dir(config_path.stem, _group_output_root(group_key))
-        generations_run, n_neurons, search_popsize = _read_run_metadata(run_dir, config_path.stem)
-        _log_runtime(config_path, n_neurons, search_popsize, chain_idx, runtime_seconds, generations_run)
-        _mark_config_done(config_path)
-        _maybe_plot_group(group_key, group_of, config_paths)
+        try:
+            subprocess.run(
+                [
+                    sys.executable, str(RUN_EVOLUTION_SCRIPT), config_name, experiment_name, DEVICE, str(chain_idx),
+                    str(EARLY_TERMINATION_ENABLED),
+                ],
+                check=True,
+            )
+            runtime_seconds = time.monotonic() - tick
+            print(f"CHAIN {chain_idx}: processed {config_path.name} in {_format_duration(runtime_seconds)}")
+            run_dir = _find_run_dir(config_path.stem, _group_output_root(group_key))
+            generations_run, n_neurons, search_popsize = _read_run_metadata(run_dir, config_path.stem)
+            _log_runtime(config_path, n_neurons, search_popsize, chain_idx, runtime_seconds, generations_run)
+            _mark_config_done(config_path)
+            _maybe_plot_group(group_key, group_of, config_paths)
+        except Exception as error:
+            # One config's subprocess crashing (or its results being unreadable right after,
+            # e.g. a still-forming run_dir) must not take the rest of this chain's queue down
+            # with it -- log it and move on, same spirit as the "moved elsewhere" skip above.
+            # config_path is deliberately left in BATCH_FOLDER (not moved to done/), so the
+            # next pass picks it up and retries it automatically.
+            print(f"CHAIN {chain_idx}: {config_path.name} failed -- {error!r} -- leaving it in {BATCH_FOLDER} for the next pass")
 
 
 # ==== 5) CROSS-CONFIG FACET: FINAL-GENERATION DECISIONS =========================
@@ -423,7 +456,30 @@ def _save_input_weighing_facet(config_stems, run_dirs, output_root, group_label)
     plt.close(figure)
 
 
-# ==== 7) MAIN EXECUTION ===========================================================
+# ==== 7) PUBLISH TO DESTINATION ===================================================
+def _publish_to_destination():
+    """Appends this session's local runtime-log rows onto
+    DESTINATION_ROOT/runtime_log_<LOG_NAME>.csv (writing the header too if that file
+    doesn't exist yet there), then deletes the local copy. This is the only thing left
+    to publish here -- every run's own output folder already published itself straight
+    to DESTINATION_ROOT as it finished (see run_evolution.py). Called once, after the
+    whole batch (every pass) has finished, whether or not every config in it succeeded.
+    No-ops if this session never logged anything (e.g. every config failed before
+    finishing)."""
+    if not RUNTIME_LOG_PATH.exists():
+        return
+    DESTINATION_ROOT.mkdir(parents=True, exist_ok=True)
+    destination_log_path = DESTINATION_ROOT / RUNTIME_LOG_PATH.name
+    write_header = not destination_log_path.exists()
+    with open(RUNTIME_LOG_PATH, "r", encoding="utf-8") as local_log:
+        rows = local_log.readlines()
+    with open(destination_log_path, "a", newline="", encoding="utf-8") as destination_log:
+        destination_log.writelines(rows if write_header else rows[1:])
+    RUNTIME_LOG_PATH.unlink()
+    print(f"\nPublished this session's runtime log to: {destination_log_path}")
+
+
+# ==== 8) MAIN EXECUTION ===========================================================
 MAX_PASSES = 5  # bounds the "reprocess whatever's left" loop below -- a config that fails
                  # the same way every pass (a real bug, not a moved/missing file) would
                  # otherwise keep the folder from ever emptying out and loop forever
@@ -495,3 +551,5 @@ else:
         f"\nStopped after {MAX_PASSES} passes with configs still left in {BATCH_FOLDER} -- likely "
         "a config that fails the same way every pass (a real bug, not a moved file). Check it by hand."
     )
+
+_publish_to_destination()
