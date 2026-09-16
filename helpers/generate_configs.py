@@ -21,7 +21,7 @@ import random
 # ==== 2. CONSTANTS / USER INPUTS ============================================
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 OUTPUT_FOLDER = PROJECT_ROOT / "configs" / "generated_sweep"
-FILENAME_PREFIX = "255_var_"   # files are named f"{FILENAME_PREFIX}{combo_slug}_{i}.json"
+FILENAME_PREFIX = "plateau_"   # files are named f"{FILENAME_PREFIX}{combo_slug}_{i}.json"
 
 # Parameters to sweep -- the cartesian product of every value list below becomes
 # one parameter combination (one "group" of N_CONFIGS_PER_GROUP configs). Keys
@@ -31,13 +31,12 @@ FILENAME_PREFIX = "255_var_"   # files are named f"{FILENAME_PREFIX}{combo_slug}
 # Windows chokes on long paths once several swept params get concatenated
 # together (e.g. "turn_reward_small" -> "t_small").
 SWEEP_PARAMS = {
-    "tau_hebb_mult": ("tm", [2,3,4]),
-    "ma_span": ("ma", [2,3,4,5,6,7,8]),
-    "weight_clamp": ("wc", [4.0, 4.5, 5.0, 5.5, 6.0]),
+    "ma_span": ("ma", [2,3,4]),
+    "weight_clamp": ("wc", [4.0, 4.5, 5.0]),
     
 }
 
-N_CONFIGS_PER_GROUP = 10   # number of seeded configs generated per parameter combination
+N_CONFIGS_PER_GROUP = 100   # number of seeded configs generated per parameter combination
 
 # ---- seeds: same 5 seed types as generate_configs.py. One list per type is
 # generated per SEED_MODE below, each of length
@@ -133,7 +132,7 @@ BASE_CONFIG = {
     # state, clip-only-when-exceeding at 5.0) -- not yet a tuned choice, just a sane
     # starting point pending a proper sweep over these three.
     "tau_hebb_mult": 2,
-    "ma_span": 5,
+    "ma_span": 3,
     "weight_clamp": 5.0,
 
     # ---- anything else (tracking/plot cadence) ----
