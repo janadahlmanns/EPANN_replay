@@ -6,6 +6,12 @@ Usage: python run_evolution.py <config_name> <experiment_name> <device> <chain_l
 chain_label is just a display label for terminal output (run_batch.py passes its chain
 index; a manual run can pass anything, e.g. "manual").
 
+Output is written under the local data_temp/ (see DATA_ROOT below) while this run is actively
+creating files, then this run's own finished output folder is published - moved as one
+already-complete unit - into data/ (DESTINATION_ROOT) as the very last step, same behavior
+whether this script is run manually/standalone or via run_batch.py. See DESTINATION_ROOT /
+_publish_run_dir below.
+
 early_termination_enabled is exactly "True" or "False" (fails loudly on anything else -
 argv values are always strings, so this project's style forbids silently guessing what a
 different value would mean). When "True" (the normal case): on a detailed-print
@@ -32,6 +38,7 @@ import functools
 import json
 import shutil
 import sys
+import time
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -69,19 +76,32 @@ from sim_core.fitness import (
     discard_earliest_recorded_generation,
     fitness_function,
     get_printing_history,
+    paradigm_has_multiple_training_tasks,
     should_terminate_early,
 )
-from sim_core.paradigm import PHASE_REPLAY, parse_paradigm
+from sim_core.paradigm import PHASE_REPLAY, parse_paradigm_variants
 
 # ==== 2) CONFIG LOADING + OUTPUT LOCATION =======================================
-# Results always live under the hardcoded DATA_ROOT - not a user choice. The
-# config is found by joining CONFIGS_ROOT with the given name + ".json" - that's
-# it, nothing else: for a plain name that's configs/<name>.json; run_batch.py
+# A run's output is written under DATA_ROOT while it's actively being created, then this
+# run's own finished RUN_DIR is moved (as one already-complete unit) into DESTINATION_ROOT
+# right at the end - see _publish_run_dir. DATA_ROOT is a plain LOCAL folder, deliberately
+# not DESTINATION_ROOT (the synced folder, e.g. FAUbox, results are meant to end up in):
+# writing straight into a synced folder while dozens of files are still being created for
+# one run raced with the sync client's own filesystem filter driver often enough to
+# intermittently corrupt output (empty or half-written run folders). Neither is a user
+# choice. The config is found by joining CONFIGS_ROOT with the given name + ".json" -
+# that's it, nothing else: for a plain name that's configs/<name>.json; run_batch.py
 # reaches configs/batch_to_run/<name>.json the same way, by passing
 # "batch_to_run/<name>" as that same argument. No defaults/fallbacks on the
 # config contents - a missing or malformed field fails loudly (KeyError), on purpose.
 CONFIGS_ROOT = PROJECT_ROOT / "configs"
-DATA_ROOT = PROJECT_ROOT / "data"
+DATA_ROOT = PROJECT_ROOT / "data_temp"
+DESTINATION_ROOT = PROJECT_ROOT / "data"  # synced folder (e.g. FAUbox) this run's finished
+                                           # output gets published to - see _publish_run_dir
+
+RETRY_ATTEMPTS = 5  # _with_retry: total tries before giving up
+RETRY_DELAY_SECONDS = 2.0  # wait between retries -- long enough for a transient filesystem
+                            # hiccup (e.g. a sync client's filter driver under load) to clear
 
 
 def _parse_bool_arg(value, arg_name):
@@ -102,6 +122,9 @@ if len(sys.argv) != 6:
     )
 CONFIG_PATH = CONFIGS_ROOT / f"{sys.argv[1]}.json"
 OUTPUT_ROOT = DATA_ROOT / sys.argv[2]
+DESTINATION_OUTPUT_ROOT = DESTINATION_ROOT / sys.argv[2]  # where RUN_DIR ends up published -- same
+                                                           # relative "experiment_name" fragment,
+                                                           # just rooted under DESTINATION_ROOT instead
 CHAIN_LABEL = sys.argv[4]  # printed as "CHAIN <label>" in terminal output - run_batch.py passes
                             # its chain index; a manual run can pass anything, e.g. "manual"
 EARLY_TERMINATION_ENABLED = _parse_bool_arg(sys.argv[5], "early_termination_enabled")
@@ -132,9 +155,19 @@ EVO_PLASTICITY_ON = CONFIG["evo_plasticity_on"]  # if False, eta is forced to al
 
 # Per-evaluation phase sequence: comma-separated (phase, value) pairs, where phase
 # is one of "trainA"/"trainB" (value = number of maze runs) or "replay" (value =
-# number of ticks). Parsed eagerly below so a malformed string fails at import time.
+# number of ticks). CONFIG["paradigm"] is either one such string (every existing
+# config; unchanged behavior) or a JSON list of several -- one drawn independently per
+# individual per generation, each variant equally likely (see fitness.py's
+# evaluate_generation/_run_paradigm_per_individual and paradigm.parse_paradigm_variants
+# for the "why" and the "same shape" requirement across variants). Parsed eagerly below
+# so a malformed paradigm fails at import time, not mid-evolution.
 PARADIGM = CONFIG["paradigm"]
-PARADIGM_PHASES = parse_paradigm(PARADIGM)
+PARADIGM_VARIANTS = parse_paradigm_variants(PARADIGM)
+# Representative structural stand-in, used below (and by fitness.py) only for things
+# that depend on phase POSITIONS/VALUES, never on which variant's phase TYPES a given
+# individual actually trained -- every variant is guaranteed the identical shape, so
+# this is safe regardless of variant count.
+PARADIGM_PHASES = PARADIGM_VARIANTS[0]
 # ordered list of (phase_type, num_runs) for training phases only, replay skipped -
 # this must stay in the same order fitness.py concatenates tracking segments in
 TRAINING_PHASE_LAYOUT = [(phase_type, value) for phase_type, value in PARADIGM_PHASES if phase_type != PHASE_REPLAY]
@@ -144,19 +177,50 @@ TRAINING_PHASE_LAYOUT = [(phase_type, value) for phase_type, value in PARADIGM_P
 # paradigm trains them) - today T is always 2, but nothing here (or in fitness.py) needs
 # touching if a future paradigm adds a third task, e.g. a double-T-maze - only
 # paradigm.py's VALID_PHASE_TYPES and fitness.py's PHASE_CONTEXT need to learn the new
-# task type exists at all. Fail loudly here, at config-load time, if the paradigm has
-# fewer than two distinct training tasks or repeats one - rather than only discovering
-# it once fitness.py's own identical check fires mid-evolution. TASK_ORDER_LABELS (e.g.
-# ["A", "B"] or, one day, ["A", "B", "C"]) reflects this run's ACTUAL paradigm order, so
-# plot/CSV labels are always correct regardless of task count or order.
+# task type exists at all. A single-training-task paradigm has no transfer to measure -
+# fitness.py's evaluate_generation skips recording transfer metrics entirely for it (see
+# paradigm_has_multiple_training_tasks), and TASK_ORDER_LABELS/HAS_TRANSFER_METRICS below
+# reflect that so this file's own transfer-metrics plot skips too, instead of both this
+# file and fitness.py separately erroring on it. A paradigm with two-or-more distinct
+# tasks where one repeats is still ambiguous for this metric, so that case still fails
+# loudly here, at config-load time, rather than only discovering it once fitness.py's
+# own identical check fires mid-evolution. TASK_ORDER_LABELS (e.g. ["A", "B"] or, one
+# day, ["A", "B", "C"]) reflects this run's ACTUAL paradigm order, so plot/CSV labels
+# are always correct regardless of task count or order.
 _TRAINING_TASK_TYPES = [phase_type for phase_type, _ in TRAINING_PHASE_LAYOUT]
-if len(_TRAINING_TASK_TYPES) < 2 or len(set(_TRAINING_TASK_TYPES)) != len(_TRAINING_TASK_TYPES):
+HAS_TRANSFER_METRICS = paradigm_has_multiple_training_tasks(PARADIGM_PHASES)
+if HAS_TRANSFER_METRICS and len(set(_TRAINING_TASK_TYPES)) != len(_TRAINING_TASK_TYPES):
     raise ValueError(
         "Forward/backward transfer metrics (see sim_core/fitness.py's _measure_transfer_metrics) "
-        f"need at least two DISTINCT training tasks, each appearing exactly once; got "
+        f"need every distinct training task to appear exactly once; got "
         f"{TRAINING_PHASE_LAYOUT} from paradigm {PARADIGM!r}."
     )
-TASK_ORDER_LABELS = [PHASE_CONTEXT[phase_type] for phase_type in _TRAINING_TASK_TYPES]
+TASK_ORDER_LABELS = [PHASE_CONTEXT[phase_type] for phase_type in _TRAINING_TASK_TYPES] if HAS_TRANSFER_METRICS else []
+
+# Transfer metrics are only meaningful population-wide if every individual actually
+# trained the SAME tasks in the SAME order -- parse_paradigm_variants only guarantees
+# variants share the same (phase, VALUE) shape, not the same phase TYPE sequence (that's
+# exactly what lets "trainA, 100" / "trainB, 100" be two variants of one run). So when
+# transfer metrics are wanted, require every variant's phase-type sequence to match
+# variant 0's exactly -- reordering/different-task-identity-per-position variants
+# combined with transfer-metric tracking needs a real generalization of fitness.py's
+# checkpoint_after_task bookkeeping that doesn't exist yet, so fail loudly here instead
+# of silently computing a meaningless (or individual-dependent) number.
+if HAS_TRANSFER_METRICS:
+    _reference_type_sequence = [phase_type for phase_type, _ in PARADIGM_VARIANTS[0]]
+    for _variant_phases in PARADIGM_VARIANTS[1:]:
+        if [phase_type for phase_type, _ in _variant_phases] != _reference_type_sequence:
+            raise ValueError(
+                "Forward/backward transfer metrics need every paradigm variant to train the "
+                f"same tasks in the same order; got variants {PARADIGM_VARIANTS} from paradigm {PARADIGM!r}."
+            )
+
+# Dedicated RNG stream for the per-individual paradigm-variant draw (see fitness.py's
+# evaluate_generation) -- only needed, and only required in the config, when there's
+# actually more than one variant to draw between; a single-paradigm run (still ~every
+# existing config) never touches this stream at all, matching its old RNG consumption
+# exactly. Same opt-in-only-when-used pattern as _config_get_if_enabled above.
+PARADIGM_SEED = CONFIG["paradigm_seed"] if len(PARADIGM_VARIANTS) > 1 else None
 
 ES_METHOD = CONFIG["es_method"]  # which evolutionary search algorithm this run uses -- gates every
                                   # es_method-specific block in this file (search hyperparameters right
@@ -289,6 +353,9 @@ constants.configure(
     crash_penalty=CONFIG["crash_penalty"],
     turn_reward_big=CONFIG["turn_reward_big"],
     turn_reward_small=CONFIG["turn_reward_small"],
+    tau_hebb_mult=CONFIG["tau_hebb_mult"],
+    ma_span=CONFIG["ma_span"],
+    weight_clamp=CONFIG["weight_clamp"],
 )
 
 GENOME_SPEC = genome_codec.genome_spec()
@@ -301,7 +368,7 @@ REWARD_HIST_FILENAME = "reward_hist.png"
 FROBENIUS_FILENAME = "frobenius.png"
 WEIGHT_DISTRIBUTION_FILENAME = "weight_distribution.png"
 REWARD_EVOLUTION_FILENAME = "reward_evolution.png"
-SENSORY_CUE_FILENAME = "sensory_cues.png"
+INPUT_DISTRIBUTIONS_FILENAME = "input_distributions.png"
 TRAINING_REWARD_FILENAME = "training_reward_evolution.png"
 L1_EVOLUTION_FILENAME = "l1_evolution.png"
 INPUT_WEIGHING_FILENAME = "input_weighing.png"
@@ -319,7 +386,7 @@ REWARD_HIST_CSV_FILENAME = "reward_hist.csv"
 FROBENIUS_CSV_FILENAME = "frobenius.csv"
 WEIGHT_DISTRIBUTION_CSV_FILENAME = "weight_distribution.csv"
 REWARD_EVOLUTION_CSV_FILENAME = "reward_evolution.csv"
-SENSORY_CUE_CSV_FILENAME = "sensory_cues.csv"
+INPUT_DISTRIBUTIONS_CSV_FILENAME = "input_distributions.csv"
 TRAINING_REWARD_CSV_FILENAME = "training_reward_evolution.csv"
 L1_EVOLUTION_CSV_FILENAME = "l1_evolution.csv"
 INPUT_WEIGHING_CSV_FILENAME = "input_weighing.csv"
@@ -1096,54 +1163,75 @@ def _save_input_weighing_plot(plot_dir, cue_importance_history):
     }))
 
 
-def _save_sensory_cue_plot(plot_dir, tracked_records):
-    """Save side-by-side bar charts of sensory cue distribution for first and last tracked generation."""
+def _draw_distribution_bars(axis, labels, percentages, title, xlabel):
+    """Shared bar-drawing for one panel of _save_input_distributions_plot -- a set of
+    labeled bars, each annotated with its own percentage, sharing a fixed 0-100 y-axis."""
+    bars = axis.bar(labels, percentages, color=PALETTE_COLORS[:len(labels)])
+    axis.set_title(title)
+    axis.set_xlabel(xlabel)
+    axis.set_ylim(0, 100)
+    for bar, pct in zip(bars, percentages):
+        axis.text(
+            bar.get_x() + bar.get_width() / 2,
+            bar.get_height() + 1.0,
+            f"{pct:.1f}%",
+            ha="center",
+            va="bottom",
+            fontsize=9,
+        )
+
+
+def _save_input_distributions_plot(plot_dir, tracked_records):
+    """Save a 2-row grid of bar charts (first vs. last tracked generation) covering every
+    per-individual "which input did this population see" distribution this run has: row 1
+    is sensory-cue distribution (per maze RUN, as before), row 2 is paradigm-variant
+    distribution (per INDIVIDUAL -- see fitness.py's evaluate_generation/variant_idx).
+    Only called when this run's config actually has more than one paradigm variant (see
+    _save_all_plots_and_results) -- with a single paradigm, every individual trivially
+    gets the same one, so that row (and the whole plot) would show nothing worth seeing."""
     first_record = tracked_records[0]
     last_record = tracked_records[-1]
 
-    figure, axes = plt.subplots(nrows=1, ncols=2, figsize=(10, 5), dpi=PLOT_DPI, sharey=True)
+    figure, axes = plt.subplots(nrows=2, ncols=2, figsize=(10, 9), dpi=PLOT_DPI, sharey=True)
 
     csv_rows = []
-    for axis, record, title_suffix in (
-        (axes[0], first_record, f"Generation {first_record['generation']}"),
-        (axes[1], last_record, f"Generation {last_record['generation']}"),
-    ):
+    for col, (record, gen_title) in enumerate((
+        (first_record, f"Generation {first_record['generation']}"),
+        (last_record, f"Generation {last_record['generation']}"),
+    )):
         cues = record["sensory_cue_by_run"].numpy()   # [pop, num_runs]
         num_runs = cues.shape[1]
         num_cue_types = int(cues.max().item()) + 1
         cue_labels = [f"cue_{chr(65 + i)}" for i in range(num_cue_types)]
-
-        counts = np.array([(cues == i).sum() for i in range(num_cue_types)], dtype=float)
-        percentages = counts / num_runs / cues.shape[0] * 100.0
-
-        bars = axis.bar(cue_labels, percentages, color=PALETTE_COLORS[:num_cue_types])
-        axis.set_title(title_suffix)
-        axis.set_xlabel("Sensory cue")
-        axis.set_ylim(0, 100)
-        for bar, pct in zip(bars, percentages):
-            axis.text(
-                bar.get_x() + bar.get_width() / 2,
-                bar.get_height() + 1.0,
-                f"{pct:.1f}%",
-                ha="center",
-                va="bottom",
-                fontsize=9,
-            )
-        for cue_label, count, pct in zip(cue_labels, counts, percentages):
+        cue_counts = np.array([(cues == i).sum() for i in range(num_cue_types)], dtype=float)
+        cue_percentages = cue_counts / num_runs / cues.shape[0] * 100.0
+        _draw_distribution_bars(axes[0, col], cue_labels, cue_percentages, gen_title, "Sensory cue")
+        for cue_label, count, pct in zip(cue_labels, cue_counts, cue_percentages):
             csv_rows.append({
-                "generation": record["generation"],
-                "cue_label": cue_label,
-                "count": int(count),
-                "percentage_of_runs": pct,
+                "generation": record["generation"], "input_type": "sensory_cue",
+                "label": cue_label, "count": int(count), "percentage": pct,
             })
 
-    axes[0].set_ylabel("Percentage of runs (%)")
-    figure.suptitle("Sensory cue distribution across maze runs")
+        variants = record["paradigm_variant_by_individual"].numpy()   # [pop]
+        num_variants = int(variants.max().item()) + 1
+        variant_labels = [f"paradigm {i + 1}" for i in range(num_variants)]
+        variant_counts = np.array([(variants == i).sum() for i in range(num_variants)], dtype=float)
+        variant_percentages = variant_counts / variants.shape[0] * 100.0
+        _draw_distribution_bars(axes[1, col], variant_labels, variant_percentages, gen_title, "Paradigm variant")
+        for variant_label, count, pct in zip(variant_labels, variant_counts, variant_percentages):
+            csv_rows.append({
+                "generation": record["generation"], "input_type": "paradigm_variant",
+                "label": variant_label, "count": int(count), "percentage": pct,
+            })
+
+    axes[0, 0].set_ylabel("Percentage of runs (%)")
+    axes[1, 0].set_ylabel("Percentage of individuals (%)")
+    figure.suptitle("Input distributions: sensory cue (per run) and paradigm variant (per individual)")
     figure.tight_layout()
-    figure.savefig(_prefixed_path(plot_dir, SENSORY_CUE_FILENAME))
+    figure.savefig(_prefixed_path(plot_dir, INPUT_DISTRIBUTIONS_FILENAME))
     plt.close(figure)
 
-    write_csv(_prefixed_path(plot_dir, SENSORY_CUE_CSV_FILENAME), csv_rows)
+    write_csv(_prefixed_path(plot_dir, INPUT_DISTRIBUTIONS_CSV_FILENAME), csv_rows)
 
 
 def _save_transfer_metrics_plot(plot_dir, transfer_metrics_history):
@@ -1200,12 +1288,44 @@ def _save_transfer_metrics_plot(plot_dir, transfer_metrics_history):
     write_csv(_prefixed_path(plot_dir, TRANSFER_METRICS_CSV_FILENAME), _columns_to_rows(csv_columns))
 
 
+def _with_retry(operation, description):
+    """Calls the zero-arg operation(), retrying a few times on a transient
+    file-not-found/permission error before giving up and raising for real. Guards
+    against a momentary filesystem hiccup (e.g. a cloud-sync filter driver briefly
+    interfering with a freshly-created/moved path under load) - NOT against the
+    underlying file/folder genuinely being gone, which still fails loudly once
+    retries are exhausted."""
+    for attempt in range(1, RETRY_ATTEMPTS + 1):
+        try:
+            return operation()
+        except (FileNotFoundError, PermissionError):
+            if attempt == RETRY_ATTEMPTS:
+                raise
+            print(f"{description}: transient error on attempt {attempt}/{RETRY_ATTEMPTS}, retrying...")
+            time.sleep(RETRY_DELAY_SECONDS)
+
+
+def _publish_run_dir():
+    """Moves this run's finished, already-complete RUN_DIR (as one unit) from the local
+    DATA_ROOT into DESTINATION_OUTPUT_ROOT (the synced folder, e.g. FAUbox) - the very
+    last thing this script does. Only ever called once RUN_DIR has everything in it (all
+    plots, results h5, config copy), so DESTINATION_OUTPUT_ROOT only ever sees complete
+    run folders land in it, never a partially-written one."""
+    DESTINATION_OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
+    destination_run_dir = DESTINATION_OUTPUT_ROOT / RUN_DIR.name
+    _with_retry(lambda: shutil.move(str(RUN_DIR), str(destination_run_dir)), "publishing run_dir")
+    return destination_run_dir
+
+
 def _save_all_plots_and_results(searcher, history, pgpe_history):
-    """Create RUN_DIR, copy the config file used for this run into it, save all
-    tracking plots, and write the full numeric results (final genomes + history)
-    to RESULTS_FILENAME - all into the one timestamped, collision-proof folder."""
+    """Create RUN_DIR, save all tracking plots and the full numeric results (final
+    genomes + history) to RESULTS_FILENAME, and only THEN copy the config file used
+    for this run in alongside them. That order is deliberate: the config copy is
+    just a bookkeeping convenience, while the plots/results are the actual compute
+    this run exists to produce - so a failure copying the config must never be able
+    to discard real results that were already sitting on disk fine. Finally, publish
+    the whole finished RUN_DIR to DESTINATION_OUTPUT_ROOT (see _publish_run_dir)."""
     RUN_DIR.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(CONFIG_PATH, RUN_DIR / CONFIG_PATH.name)
 
     tracked_generations = history["tracked_generations"]
     tracked_records = history["tracked_records"]
@@ -1224,8 +1344,16 @@ def _save_all_plots_and_results(searcher, history, pgpe_history):
     _save_training_reward_evolution_plot(RUN_DIR, reward_evolution)
     _save_l1_evolution_plot(RUN_DIR, reward_evolution)
     _save_input_weighing_plot(RUN_DIR, cue_importance_history)
-    _save_transfer_metrics_plot(RUN_DIR, transfer_metrics_history)
-    _save_sensory_cue_plot(RUN_DIR, tracked_records)
+    # Single-training-task paradigms never populate transfer_metrics_history at all
+    # (see HAS_TRANSFER_METRICS/paradigm_has_multiple_training_tasks above) - skip the
+    # plot entirely rather than have it fail on empty arrays.
+    if HAS_TRANSFER_METRICS:
+        _save_transfer_metrics_plot(RUN_DIR, transfer_metrics_history)
+    # Only meaningful once there's more than one paradigm variant to actually vary --
+    # with a single paradigm every individual trivially gets the same one, so skip the
+    # plot entirely rather than show a paradigm-variant row with nothing in it.
+    if len(PARADIGM_VARIANTS) > 1:
+        _save_input_distributions_plot(RUN_DIR, tracked_records)
 
     # ---- es_method-specific: diagnostic plots only meaningful for this run's search algorithm ----
     match ES_METHOD:
@@ -1247,7 +1375,11 @@ def _save_all_plots_and_results(searcher, history, pgpe_history):
     }
     save_results_h5(RUN_DIR / results_filename(RUN_NAME), CONFIG, run_metadata, searcher, history, pgpe_history)
 
-    print(f"\nSaved plots + results to: {RUN_DIR}")
+    _with_retry(lambda: shutil.copy2(CONFIG_PATH, RUN_DIR / CONFIG_PATH.name), "copying config")
+
+    print(f"\nSaved plots + results locally, publishing to: {DESTINATION_OUTPUT_ROOT / RUN_DIR.name}")
+    published_run_dir = _publish_run_dir()
+    print(f"Published to: {published_run_dir}")
 
 
 # ==== 5) EVOLUTION RUN ==========================================================
@@ -1265,6 +1397,12 @@ test_generator = torch.Generator(device=DEVICE)
 test_generator.manual_seed(TEST_SEED)
 weight_init_generator = torch.Generator(device=DEVICE)
 weight_init_generator.manual_seed(WEIGHT_INIT_SEED)
+# Only built when there's actually more than one paradigm variant to draw between --
+# see PARADIGM_SEED above; a single-paradigm run never touches this stream.
+paradigm_generator = None
+if PARADIGM_SEED is not None:
+    paradigm_generator = torch.Generator(device=DEVICE)
+    paradigm_generator.manual_seed(PARADIGM_SEED)
 
 objective = functools.partial(
     fitness_function,
@@ -1277,7 +1415,8 @@ objective = functools.partial(
     context_cues_on=EVO_CONTEXT_CUES_ON,
     sensory_cues_on=EVO_SENSORY_CUES_ON,
     evo_plasticity_on=EVO_PLASTICITY_ON,
-    paradigm_phases=PARADIGM_PHASES,
+    paradigm_variants=PARADIGM_VARIANTS,
+    paradigm_generator=paradigm_generator,
 )
 
 configure_printing(

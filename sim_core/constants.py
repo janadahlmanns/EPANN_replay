@@ -58,6 +58,18 @@ CRASH_PENALTY = None
 TURN_REWARD_BIG = None
 TURN_REWARD_SMALL = None
 
+# Hebbian plasticity cadence/averaging/bound (see ctrnn.py's plasticity_step and
+# maze_task.py/replay_task.py's tick loops) -- introduced to replace the old
+# unconditional-every-tick, unbounded weight update, which let W's Frobenius norm
+# explode by several orders of magnitude within a single lifetime.
+TAU_HEBB_MULT = None    # int: apply the Hebbian update (and clamp) every TAU_HEBB_MULT
+                         # ticks; 1 = every tick (original cadence). activation_step still
+                         # runs every tick regardless -- only the weight update is gated.
+MA_SPAN = None           # int: length of the moving-average window over pre/post state fed
+                         # into the Hebbian terms; 1 = instantaneous state (original behavior)
+WEIGHT_CLAMP = None      # float: ceiling on max|W| entry-wise -- clip-only-when-exceeding
+                         # (W is left untouched whenever max|W| <= WEIGHT_CLAMP already)
+
 TICKS_PER_RUN = 7                      # fixed: maze_task.py's turn/end-tick checks are
                                         # hardcoded to this length (1,2,3=straight 4=turn
                                         # 5,6,7=straight(7=mazeend)), so this is structural,
@@ -71,10 +83,12 @@ WEIGHT_INIT_HIGH = 0.1
 
 
 def configure(dt, tau, noise_std, straight_thresh, big_reward, small_reward,
-              crash_penalty, turn_reward_big, turn_reward_small):
+              crash_penalty, turn_reward_big, turn_reward_small,
+              tau_hebb_mult, ma_span, weight_clamp):
     """Set all tunable simulation constants for this run (called once by the runner)."""
     global DT, TAU, NOISE_STD, STRAIGHT_THRESH, BIG_REWARD, SMALL_REWARD
     global CRASH_PENALTY, TURN_REWARD_BIG, TURN_REWARD_SMALL
+    global TAU_HEBB_MULT, MA_SPAN, WEIGHT_CLAMP
     DT = dt
     TAU = tau
     NOISE_STD = noise_std
@@ -84,6 +98,9 @@ def configure(dt, tau, noise_std, straight_thresh, big_reward, small_reward,
     CRASH_PENALTY = crash_penalty
     TURN_REWARD_BIG = turn_reward_big
     TURN_REWARD_SMALL = turn_reward_small
+    TAU_HEBB_MULT = tau_hebb_mult
+    MA_SPAN = ma_span
+    WEIGHT_CLAMP = weight_clamp
 
 # arm / sensory-cue / turn-sign mapping:
 #   arm 0 <-> sensory cue "a" <-> turn output <= -STRAIGHT_THRESH

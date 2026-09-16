@@ -13,12 +13,15 @@ def activation_step(state, W, beta, noise_std, generator):
     return new_state
 
 
-def plasticity_step(state, W, M, A, B, C, D, eta):
-    """state here is the OLD (pre-update) state -- used as both pre- and post-synaptic activity.
-    eta is per-synapse ([pop, N, N], same shape as W), not a global scalar."""
-    pre = state
-    post = state
-
+def plasticity_step(state, W, pre, post, M, A, B, C, D, eta):
+    """state here is the OLD (pre-update) state, read only for the neuromodulatory
+    signal (mod_signal) -- always instantaneous, never averaged (Dittrich's moving-average
+    treatment applies to the Hebbian pre/post terms only, not the modulator). pre/post are
+    supplied by the caller -- today that's just state again (MA_SPAN=1 degenerates to the
+    original instantaneous-state behavior), but a caller can pass a moving average over
+    the last few ticks instead (see maze_task.py/replay_task.py's tick loops) without this
+    function needing to know the difference. eta is per-synapse ([pop, N, N], same shape
+    as W), not a global scalar."""
     mod_signal = torch.einsum("bkij,bk->bij", M, state)
     mod_term = torch.tanh(mod_signal / 2)
 

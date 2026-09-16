@@ -5,8 +5,8 @@ seeded configs per parameter combination. Meant to be copied/edited per sweep --
 change SWEEP_PARAMS, N_CONFIGS_PER_GROUP, SEED_MODE, FILENAME_PREFIX, and
 BASE_CONFIG/OVERRIDES below, then run.
 
-Example: SWEEP_PARAMS = {"n_neurons": [9, 20, 60], "evo_context_cues_on": [True, False],
-"search_popsize": [200, 400, 40]} with N_CONFIGS_PER_GROUP = 20 generates
+Example: SWEEP_PARAMS = {"n_neurons": ("nn", [9, 20, 60]), "evo_context_cues_on": ("ctx", [True, False]),
+"search_popsize": ("pop", [200, 400, 40])} with N_CONFIGS_PER_GROUP = 20 generates
 3 * 2 * 3 = 18 parameter combinations x 20 configs each = 360 config files, identical
 in every field except the swept parameters (fixed within a combination) and the
 seeds (vary within each combination, per SEED_MODE below).
@@ -21,19 +21,22 @@ import random
 # ==== 2. CONSTANTS / USER INPUTS ============================================
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 OUTPUT_FOLDER = PROJECT_ROOT / "configs" / "generated_sweep"
-FILENAME_PREFIX = "test _"   # files are named f"{FILENAME_PREFIX}{combo_slug}_{i}.json"
+FILENAME_PREFIX = "plateau_"   # files are named f"{FILENAME_PREFIX}{combo_slug}_{i}.json"
 
-# Parameters to sweep -- the cartesian product of every list below becomes one
-# parameter combination (one "group" of N_CONFIGS_PER_GROUP configs). Keys must
-# match BASE_CONFIG keys; add/remove sweep params freely, this file doesn't need
-# any other changes to keep working.
+# Parameters to sweep -- the cartesian product of every value list below becomes
+# one parameter combination (one "group" of N_CONFIGS_PER_GROUP configs). Keys
+# must match BASE_CONFIG keys; add/remove sweep params freely, this file doesn't
+# need any other changes to keep working. Each value is (abbreviation, [values]) --
+# the abbreviation replaces the full param name in generated filenames, since
+# Windows chokes on long paths once several swept params get concatenated
+# together (e.g. "turn_reward_small" -> "t_small").
 SWEEP_PARAMS = {
-    "cosyne_mutation_stdev": [0.3, 0.9],
-    "cosyne_tournament_size": [4, 12, 25],
-    "search_popsize": [50,200],
+    "ma_span": ("ma", [2,3,4]),
+    "weight_clamp": ("wc", [4.0, 4.5, 5.0]),
+    
 }
 
-N_CONFIGS_PER_GROUP = 10   # number of seeded configs generated per parameter combination
+N_CONFIGS_PER_GROUP = 100   # number of seeded configs generated per parameter combination
 
 # ---- seeds: same 5 seed types as generate_configs.py. One list per type is
 # generated per SEED_MODE below, each of length
@@ -74,8 +77,8 @@ BASE_CONFIG = {
     # from one shared search distribution every generation; Cosyne maintains a much
     # smaller population of literally-persisting individuals) 
     "es_method": "cosyne",
-    "num_generations": 300,
-    "search_popsize": 200,  
+    "num_generations": 500,
+    "search_popsize": 400,  
 
     # ---- PGPE hyperparameters 
     # "radius_init": 200,
@@ -93,12 +96,12 @@ BASE_CONFIG = {
     # "pgpe_perturb_seed": 12345,
 
     # ---- Cosyne hyperparameters (see runners/run_evolution.py). 
-    "cosyne_tournament_size": 12,
-    "cosyne_mutation_stdev": 0.9,
+    "cosyne_tournament_size": 10,
+    "cosyne_mutation_stdev": 0.75,
     "cosyne_mutation_probability": None,
     "cosyne_permute_all": True,
     "cosyne_num_elites": None,
-    "cosyne_elitism_ratio": 0.1,
+    "cosyne_elitism_ratio": 0.05,
     "cosyne_eta": None,
     "cosyne_num_children": None,
     "cosyne_initial_bounds_low": -0.3,
@@ -106,10 +109,10 @@ BASE_CONFIG = {
 
     # ---- general experiment parameters ----
     "n_neurons": 15,
-    "evo_context_cues_on": False,
+    "evo_context_cues_on": True,
     "evo_sensory_cues_on": True,
     "evo_plasticity_on": True,
-    "paradigm": "trainA, 50, replay, 10, trainB, 50",
+    "paradigm": "trainA, 20",
     "dt": 0.2,
     "tau": 1.0,
     "noise_std": 0.1,
@@ -121,8 +124,19 @@ BASE_CONFIG = {
     "turn_reward_small": 0.0,
     "l1_lambda": 0.001,
 
+    # ---- Hebbian plasticity cadence/averaging/bound (see sim_core/constants.py's
+    # TAU_HEBB_MULT/MA_SPAN/WEIGHT_CLAMP) -- replaces the old unconditional-every-tick,
+    # unbounded weight update, which let W's Frobenius norm explode by several orders of
+    # magnitude within a single lifetime. 1/1/5.0 is the smallest change from the
+    # original disabled-clamp behavior that was actually tested (every tick, instantaneous
+    # state, clip-only-when-exceeding at 5.0) -- not yet a tuned choice, just a sane
+    # starting point pending a proper sweep over these three.
+    "tau_hebb_mult": 2,
+    "ma_span": 3,
+    "weight_clamp": 5.0,
+
     # ---- anything else (tracking/plot cadence) ----
-    "tracked_per_interval": 50,
+    "tracked_per_interval": 100,
     "max_networks_preview": 6,
     "max_runs_preview": 20,
     "hist_bin_width": 1,
@@ -136,16 +150,20 @@ OVERRIDES = {}
 # ==== 3. CONFIG GENERATION FUNCTIONS ========================================
 def _sweep_combinations(sweep_params):
     """Cartesian product of sweep_params' value lists -> list of {param: value}
-    dicts, one per combination. Blind to how many params/values are given."""
+    dicts, one per combination. Blind to how many params/values are given.
+    sweep_params values are (abbreviation, [values]) pairs; the abbreviation is
+    dropped here and only used later, in _combo_slug, for filenames."""
     names = list(sweep_params.keys())
-    value_lists = [sweep_params[name] for name in names]
+    value_lists = [sweep_params[name][1] for name in names]
     return [dict(zip(names, combo)) for combo in itertools.product(*value_lists)]
 
 
-def _combo_slug(combo):
+def _combo_slug(combo, sweep_params):
     """Turn a {param: value} combination into a filesystem-safe filename fragment,
-    e.g. {"n_neurons": 9, "evo_context_cues_on": True} -> 'n_neurons_9_evo_context_cues_on_True'."""
-    return "_".join(f"{name}_{value}" for name, value in combo.items())
+    using each param's abbreviation (from sweep_params) instead of its full name,
+    e.g. {"turn_reward_small": 0.5} with sweep_params[...] = ("t_small", [...])
+    -> 't_small_0.5'."""
+    return "_".join(f"{sweep_params[name][0]}_{value}" for name, value in combo.items())
 
 
 def _generate_seed_list(mode, n, fixed_values, seed_name):
@@ -187,7 +205,7 @@ def write_config_batch(sweep_params=SWEEP_PARAMS, n_configs_per_group=N_CONFIGS_
     written_paths = []
     global_idx = 0
     for combo in combinations:
-        slug = _combo_slug(combo)
+        slug = _combo_slug(combo, sweep_params)
         for i in range(n_configs_per_group):
             seed_idx = i if same_randoms_per_group else global_idx
             seeds = {name: seed_lists[name][seed_idx] for name in seed_names}
