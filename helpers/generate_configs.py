@@ -31,7 +31,7 @@ FILENAME_PREFIX = "plateau_"   # files are named f"{FILENAME_PREFIX}{combo_slug}
 # Windows chokes on long paths once several swept params get concatenated
 # together (e.g. "turn_reward_small" -> "t_small").
 SWEEP_PARAMS = {
-    "ma_span": ("ma", [2,3,4]),
+    "ma_span": ("ma", [2,3,4]), 
     "weight_clamp": ("wc", [4.0, 4.5, 5.0]),
     
 }
@@ -133,7 +133,7 @@ BASE_CONFIG = {
     # starting point pending a proper sweep over these three.
     "tau_hebb_mult": 2,
     "ma_span": 3,
-    "weight_clamp": 5.0,
+    "weight_clamp": 5.0, 
 
     # ---- anything else (tracking/plot cadence) ----
     "tracked_per_interval": 100,
