@@ -57,32 +57,45 @@ def _draw_reward_arm(pop, reward_generator, device):
     return torch.randint(0, 2, (pop,), generator=reward_generator, device=device)
 
 
-def _context_transform_arm(big_reward_arm, context):
-    """Map the rewarded arm to the sensory-cue arm under the given context's rule.
+def _resolve_context_is_b(context, pop, device):
+    """context: "A"/"B" (a python str, same context for the whole batch -- every
+    existing single-paradigm call site) or a [pop] bool tensor (True = context "B",
+    False = "A") for a per-individual mix -- see fitness.py's _run_paradigm_per_individual,
+    which mixes rows drawn from different paradigm variants into one population-wide
+    call. Resolved to a tensor exactly once per simulate_training_phase call (context
+    never changes tick to tick within one phase)."""
+    if isinstance(context, str):
+        if context == "A":
+            return torch.zeros(pop, dtype=torch.bool, device=device)
+        if context == "B":
+            return torch.ones(pop, dtype=torch.bool, device=device)
+        raise ValueError(f"Unknown context '{context}'; valid contexts are 'A', 'B'.")
+    return context
 
-    context "A" = direct mapping (cue points straight at the reward).
-    context "B" = lateral/mirror mapping (cue points at the reflected side).
+
+def _context_transform_arm(big_reward_arm, context_is_b):
+    """Map the rewarded arm to the sensory-cue arm under each individual's own context rule.
+
+    context "A" (context_is_b False) = direct mapping (cue points straight at the reward).
+    context "B" (context_is_b True) = lateral/mirror mapping (cue points at the reflected side).
     In this single (2-arm) T-maze, "mirror" and "the other arm" happen to be the
     same operation -- but they will NOT be the same once the double T-maze adds
     context C (diagonal mapping), so this function -- not a generic "1 - arm"
     inline -- is the one place that must grow a "C" branch later.
     """
-    if context == "A":
-        return big_reward_arm
-    if context == "B":
-        return 1 - big_reward_arm
-    raise ValueError(f"Unknown context '{context}'; valid contexts are 'A', 'B'.")
+    return torch.where(context_is_b, 1 - big_reward_arm, big_reward_arm)
 
 
-def _sensory_from_arm(big_reward_arm, context):
-    """context: python str ('A' or 'B'), same context for the whole batch this call."""
-    cue_arm = _context_transform_arm(big_reward_arm, context)
+def _sensory_from_arm(big_reward_arm, context_is_b):
+    """context_is_b: [pop] bool tensor, see _resolve_context_is_b -- may mix True/False
+    within the same batch (each row uses its own context)."""
+    cue_arm = _context_transform_arm(big_reward_arm, context_is_b)
     sensory_a = (cue_arm == 0).float()
     sensory_b = 1.0 - sensory_a
     return sensory_a, sensory_b
 
 
-def _initialize_training_phase(state, context, reward_generator, device):
+def _initialize_training_phase(state, context_is_b, reward_generator, device):
     pop = state.shape[0]
     state = state.clone()
 
@@ -91,11 +104,11 @@ def _initialize_training_phase(state, context, reward_generator, device):
     chosen_arm = torch.zeros(pop, dtype=torch.long, device=device)
     total_reward = torch.zeros(pop, device=device)
 
-    context_a = torch.full((pop,), 1.0 if context == "A" else 0.0, device=device)
-    context_b = torch.full((pop,), 1.0 if context == "B" else 0.0, device=device)
+    context_a = (~context_is_b).float()
+    context_b = context_is_b.float()
 
     big_reward_arm = _draw_reward_arm(pop, reward_generator, device)
-    sensory_a, sensory_b = _sensory_from_arm(big_reward_arm, context)
+    sensory_a, sensory_b = _sensory_from_arm(big_reward_arm, context_is_b)
 
     return (
         pop,
@@ -124,8 +137,13 @@ def simulate_training_phase(state, W, M, A, B, C, D, beta, eta,
     When None (always the case for fitness.py's real evolutionary calls), this
     function's behavior and RNG consumption are completely unchanged -- the only
     added cost is one `is None` check per tick. Batched tensors are passed to it
-    as-is (recorder itself owns any pop-indexing it needs)."""
+    as-is (recorder itself owns any pop-indexing it needs).
+
+    context: "A"/"B" (whole batch) or a [pop] bool tensor mixing both -- see
+    _resolve_context_is_b. Resolved once, up front, since it never changes tick to
+    tick within one phase call."""
     max_ticks = num_runs * TICKS_PER_RUN
+    context_is_b = _resolve_context_is_b(context, state.shape[0], device)
     (
         pop,
         state,
@@ -138,7 +156,7 @@ def simulate_training_phase(state, W, M, A, B, C, D, beta, eta,
         big_reward_arm,
         sensory_a,
         sensory_b,
-    ) = _initialize_training_phase(state, context, reward_generator, device)
+    ) = _initialize_training_phase(state, context_is_b, reward_generator, device)
 
     recent_reward = torch.zeros(pop, device=device)  # reward earned last tick; fed as this tick's input, see module docstring
 
@@ -278,7 +296,7 @@ def simulate_training_phase(state, W, M, A, B, C, D, beta, eta,
 
         new_arm = _draw_reward_arm(pop, reward_generator, device)
         big_reward_arm = torch.where(terminate, new_arm, big_reward_arm)
-        new_sensory_a, new_sensory_b = _sensory_from_arm(big_reward_arm, context)
+        new_sensory_a, new_sensory_b = _sensory_from_arm(big_reward_arm, context_is_b)
         sensory_a = torch.where(terminate, new_sensory_a, sensory_a)
         sensory_b = torch.where(terminate, new_sensory_b, sensory_b)
 

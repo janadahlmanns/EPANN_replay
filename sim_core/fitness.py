@@ -626,66 +626,114 @@ def _run_paradigm_per_individual(genome, paradigm_variants, variant_idx, device,
     variant_idx[row] (values 0..len(paradigm_variants)-1) selects which entry of
     paradigm_variants that individual drew (see evaluate_generation; variant_idx is
     all-zeros -- one variant for the whole population -- whenever this run's config only
-    has one paradigm). Every variant is required to have the identical (phase, VALUE)
-    shape (see paradigm.parse_paradigm_variants), so every output tensor below has the
-    same fixed shape no matter how the population's variant draw came out.
+    has one paradigm).
 
-    Splits the population into one GPU sub-batch per DISTINCT variant actually drawn
-    this call (boolean mask, no Python-level per-individual loop), runs _run_paradigm on
-    each sub-batch with that variant's own phase list, and scatters every result back
-    into full-population-sized tensors at the original row positions. Total compute is
-    the same order as a single fused call over the whole population would have been (sum
-    over variants of sub_pop * that variant's tick count) -- this never leaves the GPU,
-    it just replaces one fused call with len(paradigm_variants) sequential vectorized
-    calls (typically a handful)."""
+    Every variant is required to have the identical (phase, VALUE, category) shape (see
+    paradigm.parse_paradigm_variants: same number of phases, same run/tick count AND same
+    training-vs-replay category at each position -- only WHICH training task, trainA vs
+    trainB, may differ position by position). That's what lets this loop go by POSITION,
+    not by variant: at each position every individual in the whole population takes the
+    SAME kind of step (one training phase together, or one replay phase together) in one
+    fused simulate_training_phase/simulate_replay_phase call over the full population --
+    only the per-row training CONTEXT (which task, resolved from variant_idx via a single
+    gather) differs, exactly like maze_task.py's activation/plasticity math already
+    varies per row via torch.where throughout. This keeps the exact same number of
+    sequential tick-loops as a single shared paradigm always had (one per phase position)
+    regardless of how many variants exist -- looping by variant instead (one full pass
+    per variant) would multiply that count by len(paradigm_variants), which is pure
+    kernel-launch overhead for no additional compute."""
     pop = state.shape[0]
-    state_final = torch.empty_like(state)
-    W_final = torch.empty_like(W)
-    training_reward = torch.empty(pop, device=device)
-    replay_reward = torch.empty(pop, device=device)
+    training_reward = torch.zeros(pop, device=device)
+    replay_reward = torch.zeros(pop, device=device)
     training_reward_by_task = {}
     checkpoint_after_task = {}
-    tracking = None
+    already_checkpointed = {}  # task_type -> [pop] bool, which rows already have their first-occurrence checkpoint
+    tracking_segments = []
 
-    for variant, paradigm_phases in enumerate(paradigm_variants):
-        rows = torch.where(variant_idx == variant)[0]
-        if rows.numel() == 0:
+    num_positions = len(paradigm_variants[0])
+    for position in range(num_positions):
+        # every variant agrees on VALUE and category (train vs replay) at this position
+        # (see parse_paradigm_variants) -- only the phase TYPE (which training task) may differ
+        value = paradigm_variants[0][position][1]
+        is_replay = paradigm_variants[0][position][0] == PHASE_REPLAY
+
+        if is_replay:
+            state, W, replay_trace = simulate_replay_phase(
+                state, W, genome["M"], genome["A"], genome["B"], genome["C"], genome["D"],
+                genome["beta"], genome["eta"], value, noise_generator, device,
+            )
+            replay_reward = replay_reward + assign_replay_reward(replay_trace, REPLAY_REWARD_METHOD)
             continue
 
-        sub_genome = {name: tensor[rows] for name, tensor in genome.items()}
-        (
-            sub_state_final, sub_W_final, sub_training_reward, sub_replay_reward,
-            sub_tracking, sub_training_reward_by_task, sub_checkpoint_after_task,
-        ) = _run_paradigm(
-            sub_genome, paradigm_phases, device, noise_generator, reward_generator, collect_tracking,
-            context_cues_on, sensory_cues_on, reward_cues_on, state[rows], W[rows],
+        # per-row: which training task does THIS individual's own variant use at this
+        # position? A single gather, not a Python loop over variants.
+        is_b_by_variant = torch.tensor(
+            [paradigm_variants[v][position][0] == PHASE_TRAIN_B for v in range(len(paradigm_variants))],
+            dtype=torch.bool, device=device,
         )
+        context_is_b = is_b_by_variant[variant_idx]
 
-        state_final[rows] = sub_state_final
-        W_final[rows] = sub_W_final
-        training_reward[rows] = sub_training_reward
-        replay_reward[rows] = sub_replay_reward
-
-        for phase_type, reward_by_task in sub_training_reward_by_task.items():
-            training_reward_by_task.setdefault(phase_type, torch.zeros(pop, device=device))[rows] = reward_by_task
-
-        for phase_type, (chk_state, chk_W) in sub_checkpoint_after_task.items():
-            full_state, full_W = checkpoint_after_task.setdefault(
-                phase_type, (torch.zeros_like(state), torch.zeros_like(W))
-            )
-            full_state[rows] = chk_state
-            full_W[rows] = chk_W
-
+        result = simulate_training_phase(
+            state, W, genome["M"], genome["A"], genome["B"], genome["C"], genome["D"],
+            genome["beta"], genome["eta"], context_is_b, value,
+            context_cues_on, sensory_cues_on, reward_cues_on,
+            noise_generator, reward_generator, device,
+            collect_tracking=collect_tracking,
+        )
         if collect_tracking:
-            if tracking is None:
-                tracking = {
-                    key: torch.zeros((pop,) + value.shape[1:], dtype=value.dtype, device=value.device)
-                    for key, value in sub_tracking.items()
-                }
-            for key, value in sub_tracking.items():
-                tracking[key][rows] = value
+            state, W, phase_reward, phase_tracking = result
+            tracking_segments.append(phase_tracking)
+        else:
+            state, W, phase_reward = result
+        training_reward = training_reward + phase_reward
 
-    return state_final, W_final, training_reward, replay_reward, tracking, training_reward_by_task, checkpoint_after_task
+        for task_type, task_is_b in ((PHASE_TRAIN_A, False), (PHASE_TRAIN_B, True)):
+            task_mask = context_is_b == task_is_b
+            if not torch.any(task_mask):
+                continue
+
+            reward_by_task = training_reward_by_task.setdefault(task_type, torch.zeros(pop, device=device))
+            reward_by_task[task_mask] += phase_reward[task_mask]
+
+            checkpointed = already_checkpointed.setdefault(task_type, torch.zeros(pop, dtype=torch.bool, device=device))
+            first_occurrence = task_mask & (~checkpointed)
+            if torch.any(first_occurrence):
+                chk_state, chk_W = checkpoint_after_task.setdefault(
+                    task_type, (torch.zeros_like(state), torch.zeros_like(W))
+                )
+                chk_state[first_occurrence] = state[first_occurrence]
+                chk_W[first_occurrence] = W[first_occurrence]
+                checkpointed |= first_occurrence
+
+    tracking = _concat_tracking_segments(tracking_segments) if collect_tracking else None
+    return state, W, training_reward, replay_reward, tracking, training_reward_by_task, checkpoint_after_task
+
+
+# ---- post-hoc fixed-paradigm test (no evolutionary update) --------------------
+def run_fixed_paradigm_test(genome, paradigm_phases, device, noise_generator, reward_generator,
+                             weight_init_generator, context_cues_on, sensory_cues_on):
+    """Runs ONE fixed paradigm -- every individual in `genome` takes the identical
+    paradigm_phases, never a per-individual variant draw -- from fresh zero state and
+    fresh initial weights, with reward cues always on (matching evaluate_generation's
+    real-evaluation convention). No evolutionary update happens here: this is a
+    read-only probe over already-evolved genome tensors, for post-hoc paradigm-
+    generalization testing of a saved final population (see analysis/composite_plot.py),
+    not for evolution itself. Online plasticity still runs normally within the rollout
+    (eta acts exactly as it would during evolution) -- only the genome tensors
+    themselves are guaranteed untouched. Returns (tracking, reward): the per-run tracking
+    dict (decisions_by_run, crashed_by_run, rewarded_by_run, correct_arm_by_run, ...),
+    collected unconditionally, plus reward -- one performance number per individual
+    (training + replay reward, UNregularized -- no L1 penalty, matching project-plan
+    point 6.1's "performance is reward collected only, never the L1-/replay-adjusted
+    evolutionary fitness")."""
+    pop = genome["beta"].shape[0]
+    W_init = sample_initial_weights(pop, device, weight_init_generator)
+    state0 = torch.zeros(pop, constants.N, device=device)
+    _, _, training_reward, replay_reward, tracking, _, _ = _run_paradigm(
+        genome, paradigm_phases, device, noise_generator, reward_generator, True,
+        context_cues_on, sensory_cues_on, True, state0, W_init,
+    )
+    return tracking, training_reward + replay_reward
 
 
 def _measure_cue_importance(genome, paradigm_variants, variant_idx, device, test_generator,
@@ -846,6 +894,62 @@ def _measure_transfer_metrics(genome, device, test_generator, context_cues_on, s
     return {"bwt": bwt, "fwt": fwt, "components": components}
 
 
+def _measure_transfer_metrics_per_individual(genome, paradigm_variants, variant_idx, device, test_generator,
+                                              context_cues_on, sensory_cues_on, state0, W_init,
+                                              checkpoint_after_task, state_final, W_final, training_reward_by_task):
+    """Like _measure_transfer_metrics, but each individual's BWT/FWT is computed using ITS
+    OWN paradigm variant's task order (variant_idx, same draw _run_paradigm_per_individual
+    used for the real run) -- needed whenever variants train the same tasks in different
+    orders (e.g. "trainA,50,replay,10,trainB,50" vs "trainB,50,replay,10,trainA,50").
+    _measure_transfer_metrics itself is already order-flexible (see its docstring); this
+    just calls it once per DISTINCT variant actually drawn, on that variant's row subset,
+    and merges the results -- same boolean-mask-and-scatter approach as
+    _run_paradigm_per_individual, so this never leaves the GPU either.
+
+    bwt/fwt come back as one full-population-sized tensor each (every individual gets
+    exactly one BWT/FWT number, from its own order). "components" (the R_i,i/R_T,i/
+    R_i-1,i/baseline traceability probes -- see _measure_transfer_metrics) are keyed by
+    task-TYPE where order-independent (e.g. "R_A_own", "baseline_A" -- identical meaning
+    regardless of variant, so merged into one population-wide tensor across every variant
+    that trains that task) and by task-CHAIN where order-dependent (e.g.
+    "R_A_then_B_zero_shot") -- those only ever come from the variant(s) whose order
+    actually produces that chain, so they end up sized to that sub-population, exactly
+    like a component that only existed from some generation onward already works in
+    _record_transfer_metrics (per-key running lists, independent lengths)."""
+    pop = state0.shape[0]
+    bwt = torch.empty(pop, device=device)
+    fwt = torch.empty(pop, device=device)
+    component_parts = {}  # label -> list of (rows, tensor), merged after the loop
+
+    for variant, paradigm_phases in enumerate(paradigm_variants):
+        rows = torch.where(variant_idx == variant)[0]
+        if rows.numel() == 0:
+            continue
+
+        task_order = _training_task_order(paradigm_phases)
+        sub_genome = {name: tensor[rows] for name, tensor in genome.items()}
+        sub_checkpoint_after_task = {
+            phase_type: (chk_state[rows], chk_W[rows])
+            for phase_type, (chk_state, chk_W) in checkpoint_after_task.items()
+        }
+        sub_training_reward_by_task = {
+            phase_type: reward[rows] for phase_type, reward in training_reward_by_task.items()
+        }
+        sub_metrics = _measure_transfer_metrics(
+            sub_genome, device, test_generator, context_cues_on, sensory_cues_on,
+            state0[rows], W_init[rows], sub_checkpoint_after_task, state_final[rows], W_final[rows],
+            task_order, sub_training_reward_by_task,
+        )
+
+        bwt[rows] = sub_metrics["bwt"]
+        fwt[rows] = sub_metrics["fwt"]
+        for label, tensor in sub_metrics["components"].items():
+            component_parts.setdefault(label, []).append((rows, tensor))
+
+    components = {label: torch.cat([tensor for _, tensor in parts]) for label, parts in component_parts.items()}
+    return {"bwt": bwt, "fwt": fwt, "components": components}
+
+
 # ==== 7) FITNESS EVALUATION =====================================================
 def evaluate_generation(genome_flat, device, noise_generator, reward_generator, test_generator,
                          weight_init_generator, l1_lambda, context_cues_on, sensory_cues_on,
@@ -923,17 +1027,18 @@ def evaluate_generation(genome_flat, device, noise_generator, reward_generator, 
         )
         _record_cue_importance(evaluation_idx, context_importance, sensory_importance, reward_importance)
 
-        # Single-training-task paradigms have no transfer to measure -- skip rather
-        # than hit _training_task_order's loud ValueError, see paradigm_has_multiple_training_tasks.
-        # (Safe to read off representative_paradigm_phases alone: whenever transfer metrics
-        # are actually wanted, run_evolution.py requires every variant to share the same
-        # task-type sequence, not just the same shape -- see its HAS_TRANSFER_METRICS check.)
+        # Single-training-task paradigms have no transfer to measure -- skip rather than
+        # hit _training_task_order's loud ValueError, see paradigm_has_multiple_training_tasks.
+        # (Safe to read off representative_paradigm_phases alone: run_evolution.py requires
+        # every variant to independently have >= 2 distinct training tasks whenever the
+        # representative one does -- see its HAS_TRANSFER_METRICS check -- variants are free
+        # to train them in different orders, handled per-individual by
+        # _measure_transfer_metrics_per_individual below.)
         if paradigm_has_multiple_training_tasks(representative_paradigm_phases):
-            task_order = _training_task_order(representative_paradigm_phases)
-            transfer_metrics = _measure_transfer_metrics(
-                genome, device, test_generator, context_cues_on, sensory_cues_on,
-                state0, W_init, checkpoint_after_task, state_final, W_final,
-                task_order, training_reward_by_task,
+            transfer_metrics = _measure_transfer_metrics_per_individual(
+                genome, paradigm_variants, variant_idx, device, test_generator,
+                context_cues_on, sensory_cues_on, state0, W_init,
+                checkpoint_after_task, state_final, W_final, training_reward_by_task,
             )
             _record_transfer_metrics(evaluation_idx, transfer_metrics)
     else:
