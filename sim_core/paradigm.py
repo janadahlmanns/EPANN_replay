@@ -45,24 +45,29 @@ def parse_paradigm_variants(paradigm_field):
     per generation -- see fitness.py's evaluate_generation/_run_paradigm_per_individual).
     There is no explicit weighting -- N variants means each gets probability 1/N.
 
-    All variants must have IDENTICAL shape: the same number of phases, and the same
-    (run/tick count) VALUE at each position -- only the phase TYPE may differ position
-    by position (e.g. "trainA, 100" vs "trainB, 100"). This is what lets every
-    downstream tensor (tracking, plots) keep one fixed shape across the whole
-    population regardless of which variant an individual drew."""
+    All variants must have IDENTICAL shape: the same number of phases, the same
+    (run/tick count) VALUE at each position, AND the same CATEGORY (training vs.
+    replay) at each position -- only WHICH training task (trainA vs trainB) may differ
+    position by position (e.g. "trainA, 100" vs "trainB, 100"). This is what lets
+    fitness.py's _run_paradigm_per_individual process the whole population through one
+    shared tick loop per POSITION (never one loop per variant -- see its docstring):
+    every downstream tensor (tracking, plots) keeps one fixed shape regardless of which
+    variant an individual drew, and a replay position never needs to be mixed with a
+    training one within the same population-wide call."""
     if isinstance(paradigm_field, str):
         return [parse_paradigm(paradigm_field)]
     if not isinstance(paradigm_field, list) or not paradigm_field:
         raise ValueError(f"paradigm must be a string or a non-empty list of strings, got {paradigm_field!r}")
 
     variants = [parse_paradigm(variant_str) for variant_str in paradigm_field]
-    reference_values = [value for _, value in variants[0]]
+    reference_shape = [(value, phase_type == PHASE_REPLAY) for phase_type, value in variants[0]]
     for variant_str, variant_phases in zip(paradigm_field, variants):
-        values = [value for _, value in variant_phases]
-        if values != reference_values:
+        shape = [(value, phase_type == PHASE_REPLAY) for phase_type, value in variant_phases]
+        if shape != reference_shape:
             raise ValueError(
                 "All paradigm variants must have the same shape (same number of phases, same "
-                f"run/tick count at each position); variant {variant_str!r} has value sequence "
-                f"{values}, expected {reference_values} (from {paradigm_field[0]!r})."
+                "run/tick count AND same training-vs-replay category at each position); variant "
+                f"{variant_str!r} has (value, is_replay) sequence {shape}, expected {reference_shape} "
+                f"(from {paradigm_field[0]!r})."
             )
     return variants

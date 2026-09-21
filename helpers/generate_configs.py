@@ -21,7 +21,7 @@ import random
 # ==== 2. CONSTANTS / USER INPUTS ============================================
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 OUTPUT_FOLDER = PROJECT_ROOT / "configs" / "generated_sweep"
-FILENAME_PREFIX = "plateau_"   # files are named f"{FILENAME_PREFIX}{combo_slug}_{i}.json"
+FILENAME_PREFIX = "flex_task"   # files are named f"{FILENAME_PREFIX}{combo_slug}_{i}.json"
 
 # Parameters to sweep -- the cartesian product of every value list below becomes
 # one parameter combination (one "group" of N_CONFIGS_PER_GROUP configs). Keys
@@ -31,19 +31,21 @@ FILENAME_PREFIX = "plateau_"   # files are named f"{FILENAME_PREFIX}{combo_slug}
 # Windows chokes on long paths once several swept params get concatenated
 # together (e.g. "turn_reward_small" -> "t_small").
 SWEEP_PARAMS = {
-    "ma_span": ("ma", [2,3,4]), 
-    "weight_clamp": ("wc", [4.0, 4.5, 5.0]),
     
 }
 
 N_CONFIGS_PER_GROUP = 100   # number of seeded configs generated per parameter combination
 
-# ---- seeds: same 5 seed types as generate_configs.py. One list per type is
+# ---- seeds: same 6 seed types as run_evolution.py. One list per type is
 # generated per SEED_MODE below, each of length
 # len(sweep combinations) * N_CONFIGS_PER_GROUP -- unless SAME_RANDOMS_PER_GROUP
 # is True, in which case only N_CONFIGS_PER_GROUP seeds are generated and that
 # same list is reused for every combination (so e.g. config #3 of every parameter
-# combination shares its seeds, controlling for RNG when comparing across combos). ----
+# combination shares its seeds, controlling for RNG when comparing across combos).
+# paradigm_seed is only actually READ by run_evolution.py when BASE_CONFIG's "paradigm"
+# (or an override/sweep value replacing it) is a list of more than one variant -- it's
+# generated and written unconditionally here anyway, same as every other seed, so it's
+# never missing the day a sweep does start varying "paradigm" into a multi-variant list. ----
 SEED_MODE = "random"   # "random" | "incrementing" | "fixed"
 SAME_RANDOMS_PER_GROUP = True   # True = reuse one seed list across every combination
 # only read when SEED_MODE == "fixed" -- each list must have exactly
@@ -55,6 +57,7 @@ FIXED_SEEDS = {
     "reward_seed": [],
     "test_seed": [],
     "weight_init_seed": [],
+    "paradigm_seed": [],
 }
 
 
@@ -68,6 +71,7 @@ BASE_CONFIG = {
     "reward_seed": None,
     "test_seed": None,
     "weight_init_seed": None,
+    "paradigm_seed": None,   # only actually used by run_evolution.py when "paradigm" below is a multi-variant list
 
     # ---- evolutionary search: method choice + the hyperparameters that concern it.
 
@@ -112,7 +116,7 @@ BASE_CONFIG = {
     "evo_context_cues_on": True,
     "evo_sensory_cues_on": True,
     "evo_plasticity_on": True,
-    "paradigm": "trainA, 20",
+    "paradigm": ["trainA, 50, trainB, 50", "trainB, 50, trainA, 50"],
     "dt": 0.2,
     "tau": 1.0,
     "noise_std": 0.1,
@@ -196,7 +200,7 @@ def write_config_batch(sweep_params=SWEEP_PARAMS, n_configs_per_group=N_CONFIGS_
     # (re-indexed by i, not global_idx) for every combination. Otherwise every
     # config across the whole batch gets its own independently-generated seed.
     seed_list_len = n_configs_per_group if same_randoms_per_group else len(combinations) * n_configs_per_group
-    seed_names = ["master_seed", "noise_seed", "reward_seed", "test_seed", "weight_init_seed"]
+    seed_names = ["master_seed", "noise_seed", "reward_seed", "test_seed", "weight_init_seed", "paradigm_seed"]
     seed_lists = {
         name: _generate_seed_list(seed_mode, seed_list_len, fixed_seeds.get(name, []), name)
         for name in seed_names

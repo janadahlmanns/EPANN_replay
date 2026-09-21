@@ -197,22 +197,19 @@ if HAS_TRANSFER_METRICS and len(set(_TRAINING_TASK_TYPES)) != len(_TRAINING_TASK
     )
 TASK_ORDER_LABELS = [PHASE_CONTEXT[phase_type] for phase_type in _TRAINING_TASK_TYPES] if HAS_TRANSFER_METRICS else []
 
-# Transfer metrics are only meaningful population-wide if every individual actually
-# trained the SAME tasks in the SAME order -- parse_paradigm_variants only guarantees
-# variants share the same (phase, VALUE) shape, not the same phase TYPE sequence (that's
-# exactly what lets "trainA, 100" / "trainB, 100" be two variants of one run). So when
-# transfer metrics are wanted, require every variant's phase-type sequence to match
-# variant 0's exactly -- reordering/different-task-identity-per-position variants
-# combined with transfer-metric tracking needs a real generalization of fitness.py's
-# checkpoint_after_task bookkeeping that doesn't exist yet, so fail loudly here instead
-# of silently computing a meaningless (or individual-dependent) number.
+# Transfer metrics are computed per-individual, using each individual's OWN variant's
+# task order (see fitness.py's _measure_transfer_metrics_per_individual) -- variants are
+# free to train the same tasks in different orders (e.g. "trainA,50,replay,10,trainB,50"
+# vs "trainB,50,replay,10,trainA,50"). What's NOT supported is a variant that doesn't
+# itself have >= 2 distinct training tasks whenever the representative one does (that
+# variant's rows would hit _training_task_order's own ValueError mid-evolution) -- fail
+# loudly here, at config-load time, instead.
 if HAS_TRANSFER_METRICS:
-    _reference_type_sequence = [phase_type for phase_type, _ in PARADIGM_VARIANTS[0]]
     for _variant_phases in PARADIGM_VARIANTS[1:]:
-        if [phase_type for phase_type, _ in _variant_phases] != _reference_type_sequence:
+        if not paradigm_has_multiple_training_tasks(_variant_phases):
             raise ValueError(
-                "Forward/backward transfer metrics need every paradigm variant to train the "
-                f"same tasks in the same order; got variants {PARADIGM_VARIANTS} from paradigm {PARADIGM!r}."
+                "Forward/backward transfer metrics need EVERY paradigm variant to have at least "
+                f"two distinct training tasks; got variants {PARADIGM_VARIANTS} from paradigm {PARADIGM!r}."
             )
 
 # Dedicated RNG stream for the per-individual paradigm-variant draw (see fitness.py's
